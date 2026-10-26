@@ -392,6 +392,25 @@ only the `web_*` members costs **84 MB instead of 1,222 MB**.
 
 With `thread_support=false` the exporter uses `web_nothreads_release.zip`.
 
+### Level-select capacity
+
+The select rows are absolutely positioned (`y = 170 + i * 76`) with no
+scrolling, so the list fits **exactly six levels**:
+
+| Levels | Result |
+|---|---|
+| 6 | fits |
+| 7 | the row collides with the BACK button |
+| 8 | falls outside the pool and off the 760px window |
+
+`levels_clear_back_button` and `levels_within_pool` measure the real node
+positions and fail the moment that happens, so adding a seventh level breaks
+the suite - and therefore the deploy - instead of quietly looking broken.
+Verified by temporarily adding a seventh level and confirming exit code 1.
+
+Scaling past six needs a layout change, not a tweak: a `ScrollContainer`, pages
+of six, or a proper level map.
+
 ## Dev harnesses
 
     godot4 --path . --headless -- selftest   # 13 checks: classification, blasts, cascade

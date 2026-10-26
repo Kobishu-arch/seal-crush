@@ -55,6 +55,9 @@ const LEVELS := [
 ]
 const STAR_2 := 1.3          # multiples of target
 const STAR_3 := 1.6
+# Screen y where the select scene's pool ends (bg_play water bottom, base
+# y341 at 2x). Rows below this spill onto the snow and stop being readable.
+const SELECT_FLOOR := 682.0
 const SAVE_PATH := "user://progress.cfg"
 
 # goal kinds
@@ -121,6 +124,7 @@ var select_layer: Node2D
 var state := ST_MENU
 var select_buttons: Array = []
 var select_stars: Array = []
+var select_back: Button
 var jelly: Array = []          # jelly[r][c] layers left on that cell, 0 = none
 var jelly_left := 0
 var collected := 0             # pieces of the goal species cleared this level
@@ -583,6 +587,7 @@ func _build_select() -> void:
 		select_stars.append(row)
 
 	var back := _button("BACK", Vector2(250, 610), Vector2(140, 46), 21)
+	select_back = back
 	back.pressed.connect(func(): _goto(ST_MENU))
 	select_layer.add_child(back)
 	select_layer.add_child(_screen_label("CLEAR A LEVEL TO UNLOCK THE NEXT", 684, 14,
@@ -2156,6 +2161,16 @@ func _selftest() -> void:
 	var combo_left: float = combo_label.position.x + combo_label.size.x - combo_w
 	ok = _check("hud_no_overlap", goal_right < combo_left, true) and ok
 	_load_level(0)
+
+	# The select rows are absolutely positioned with no scrolling, so the list
+	# silently outgrows the screen as levels are added - it fits exactly six.
+	# Measured from the real nodes, not by redoing the layout arithmetic, so
+	# the check cannot drift from the code it guards.
+	var last_row: Button = select_buttons[select_buttons.size() - 1]
+	var rows_bottom: float = last_row.position.y + last_row.size.y
+	ok = _check("levels_clear_back_button",
+			rows_bottom < select_back.position.y, true) and ok
+	ok = _check("levels_within_pool", rows_bottom < SELECT_FLOOR, true) and ok
 	# the top slice must line up with the board origin or the seam shows
 	var slice: AtlasTexture = bg_front.texture
 	ok = _check("bg_front_slice", slice.region.size.y * 2.0, ORIGIN.y) and ok
