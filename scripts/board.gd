@@ -368,7 +368,9 @@ func _build_ui() -> void:
 	hud_layer.add_child(bar_fill)
 
 	combo_label = Label.new()
-	combo_label.position = Vector2(250, 108)
+	combo_label.position = Vector2(300, 110)
+	combo_label.size = Vector2(276, 22)
+	combo_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_font(combo_label, 14, Color("ff95bb"))
 	combo_label.modulate.a = 0.0
 	combo_label.z_index = 6
@@ -753,7 +755,7 @@ func _update_score() -> void:
 
 func _show_combo(combo: int, gained: int) -> void:
 	if combo > 1:
-		combo_label.text = "COMBO x%d   +%d" % [combo, gained]
+		combo_label.text = "COMBO x%d  +%d" % [combo, gained]
 	else:
 		combo_label.text = "+%d" % gained
 	combo_label.modulate.a = 1.0
@@ -1804,6 +1806,9 @@ func _shot_special() -> void:
 
 func _shot_jelly() -> void:
 	await _start_level(3)
+	score = 930
+	_update_score()
+	_show_combo(4, 880)
 	await get_tree().create_timer(0.4).timeout
 	await _save_shot("user://shot_jelly.png")
 	music.stop()
@@ -2160,6 +2165,22 @@ func _selftest() -> void:
 		if ch is Sprite2D and ch.texture != null:
 			fades += 1
 	ok = _check("ui_fades", fades, 2) and ok
+
+	# The combo readout used to sit at a fixed x and ran straight over the goal
+	# text. Measure the worst case - longest goal string, widest combo - and
+	# assert they cannot touch.
+	_load_level(4)                      # collect walruses: the longest goal text
+	collected = 15
+	_update_score()
+	_show_combo(9, 4320)
+	var goal_w: float = ui_font.get_string_size(
+			target_label.text, HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
+	var combo_w: float = ui_font.get_string_size(
+			combo_label.text, HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
+	var goal_right: float = target_label.position.x + goal_w
+	var combo_left: float = combo_label.position.x + combo_label.size.x - combo_w
+	ok = _check("hud_no_overlap", goal_right < combo_left, true) and ok
+	_load_level(0)
 	# the top slice must line up with the board origin or the seam shows
 	var slice: AtlasTexture = bg_front.texture
 	ok = _check("bg_front_slice", slice.region.size.y * 2.0, ORIGIN.y) and ok
