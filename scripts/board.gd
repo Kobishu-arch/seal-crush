@@ -126,6 +126,10 @@ var star_base := 0
 var no_finish := false   # dev: balance harness plays every move
 var shuffles_left := 0
 var level_table: Array = []
+var board_shape: Array = []  # per-level outline, '#' marks a hole
+var blocked: Array = []      # blocked[r][c]: a hole in the board
+var col_top: Array = []      # highest open row per column, -1 if the column is closed
+var col_bot: Array = []      # lowest open row per column
 var fast := false          # dev: skip animation waits (balance harness)
 var won := false
 var moves_label: Label
@@ -188,6 +192,8 @@ func _ready() -> void:
 		_shot_select()
 	elif args.has("shotjelly"):
 		_shot_jelly()
+	elif args.has("shotshape"):
+		_shot_shape()
 	elif args.has("levels"):
 		_print_levels()
 
@@ -805,6 +811,15 @@ func _draw() -> void:
 	for r in ROWS:
 		for c in COLS:
 			var p: Vector2 = ORIGIN + Vector2(c * CELL, r * CELL)
+			if not _is_open(r, c):
+				# a slab of ice sitting in the pool
+				draw_rect(Rect2(p + Vector2(1, 1), Vector2(CELL - 2, CELL - 2)),
+						Color(0.70, 0.83, 0.92, 0.95), true)
+				draw_rect(Rect2(p + Vector2(1, 1), Vector2(CELL - 2, 6)),
+						Color(0.90, 0.96, 1.0, 0.95), true)
+				draw_rect(Rect2(p + Vector2(1, 1), Vector2(CELL - 2, CELL - 2)),
+						Color(0.35, 0.50, 0.62, 0.8), false, 2.0)
+				continue
 			var tint := Color(1, 1, 1, 0.025) if (r + c) % 2 == 0 else Color(1, 1, 1, 0.055)
 			draw_rect(Rect2(p, Vector2(CELL, CELL)), tint, true)
 			if jelly.size() == ROWS and jelly[r][c] > 0:
@@ -949,6 +964,8 @@ func _cell_at(pos: Vector2) -> Vector2i:
 	var r := int(floor(local.y / CELL))
 	if c < 0 or c >= COLS or r < 0 or r >= ROWS:
 		return Vector2i(-1, -1)
+	if not _is_open(r, c):
+		return Vector2i(-1, -1)
 	return Vector2i(c, r)
 
 
@@ -986,6 +1003,8 @@ func _fill_board() -> void:
 			pieces[r].append(null)
 	for r in ROWS:
 		for c in COLS:
+			if not _is_open(r, c):
+				continue
 			var choices: Array = []
 			for s in species_count:
 				if not _would_match(r, c, s):
@@ -1349,8 +1368,16 @@ func _collapse() -> void:
 		t = create_tween().set_parallel(true)
 	var moved := false
 	for c in COLS:
-		var write := ROWS - 1
-		for r in range(ROWS - 1, -1, -1):
+		# Falling is confined to the column's open span. The contiguity
+		# invariant from _build_blocked() is what makes this correct: with no
+		# hole inside the span, straight-down compaction never has to route a
+		# piece around anything.
+		var bottom: int = col_bot[c] if col_bot.size() == COLS else ROWS - 1
+		var ceiling: int = col_top[c] if col_top.size() == COLS else 0
+		if bottom < 0:
+			continue
+		var write := bottom
+		for r in range(bottom, ceiling - 1, -1):
 			if grid[r][c] >= 0:
 				if r != write:
 					grid[write][c] = grid[r][c]
@@ -1367,8 +1394,8 @@ func _collapse() -> void:
 							.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
 					moved = true
 				write -= 1
-		var empties := write + 1
-		for r in range(write, -1, -1):
+		var empties := write - ceiling + 1
+		for r in range(write, ceiling - 1, -1):
 			var s := randi() % species_count
 			grid[r][c] = s
 			special[r][c] = SP_NONE
@@ -1569,6 +1596,95 @@ func _stars_for(sc: int) -> int:
 	return 0
 
 
+func _shape_mask(shape: String, extent: float) -> Array:
+	"""Board outline as 8 strings: '.' open, '#' blocked.
+
+	Only shapes whose open cells are CONTIGUOUS per column are usable. That
+	invariant is what lets pieces keep falling straight down - a hole in the
+	middle of a column would split it into regions with no way to refill the
+	lower one, which is why real match-3 games route pieces diagonally. A ring
+	is the obvious shape this rules out; _build_blocked() rejects any layout
+	that breaks it rather than letting it fail silently at runtime.
+	"""
+	var rows: Array = []
+	for r in ROWS:
+		var line := ""
+		for c in COLS:
+			var dx: float = abs(c - (COLS - 1) / 2.0)
+			var dy: float = abs(r - (ROWS - 1) / 2.0)
+			var open_cell := true
+			match shape:
+				"corners":
+					# dx+dy <= extent: 6.0 shaves the corners (60 of 64 open),
+					# 5.0 a chamfered square (52), 4.0 a diamond (40)
+					open_cell = dx + dy <= extent
+				"jagged":
+					# steps cut from the TOP of each column only, which cannot
+					# break contiguity whatever the pattern (56 of 64 open)
+					open_cell = r >= (c * 5) % 3
+				_:
+					open_cell = true
+			line += "." if open_cell else "#"
+		rows.append(line)
+	return rows
+
+
+func _is_open(r: int, c: int) -> bool:
+	if blocked.size() < ROWS:
+		return true
+	return not blocked[r][c]
+
+
+func _build_blocked() -> void:
+	blocked = []
+	for r in ROWS:
+		blocked.append([])
+		for c in COLS:
+			blocked[r].append(false)
+	var mask: Array = board_shape
+	for r in mini(mask.size(), ROWS):
+		var line: String = mask[r]
+		for c in mini(line.length(), COLS):
+			if line[c] == "#":
+				blocked[r][c] = true
+
+	# enforce the contiguity invariant; fall back to a full board if broken
+	col_top = []
+	col_bot = []
+	for c in COLS:
+		var first := -1
+		var last := -1
+		for r in ROWS:
+			if not blocked[r][c]:
+				if first < 0:
+					first = r
+				last = r
+		var gap := false
+		if first >= 0:
+			for r in range(first, last + 1):
+				if blocked[r][c]:
+					gap = true
+		if gap:
+			push_warning("board shape splits column %d; falling back to a full board" % c)
+			_build_blocked_full()
+			return
+		col_top.append(first)
+		col_bot.append(last)
+
+
+func _build_blocked_full() -> void:
+	blocked = []
+	col_top = []
+	col_bot = []
+	for r in ROWS:
+		blocked.append([])
+		for c in COLS:
+			blocked[r].append(false)
+	for c in COLS:
+		col_top.append(0)
+		col_bot.append(ROWS - 1)
+
+
 func _jelly_pattern(shape: String, extent: float) -> Array:
 	"""Builds an 8-string jelly layout. Generated rather than typed so jelly
 	levels scale with the curve instead of needing a new hand-drawn layout."""
@@ -1642,6 +1758,12 @@ func _level_spec(n: int) -> Dictionary:
 		kind = GOAL_JELLY
 
 	var spec := {"species": species, "moves": moves}
+	# every third level narrows the board, tightening as chapters progress
+	if step % 3 == 2:
+		if (idx / 3) % 2 == 0:
+			spec["shape"] = _shape_mask("corners", maxf(6.0 - float(chapter) * 0.5, 4.5))
+		else:
+			spec["shape"] = _shape_mask("jagged", 0.0)
 	match kind:
 		GOAL_COLLECT:
 			# random play collects ~1 piece of a given species per move
@@ -1714,9 +1836,11 @@ func _load_level(i: int) -> void:
 	moves_left = cfg["moves"]
 	star_base = cfg["star_base"]
 	goal = (cfg["goal"] as Dictionary).duplicate(true)
+	board_shape = cfg.get("shape", [])
 	target = int(goal.get("score", star_base))
 	collected = 0
 	shuffles_left = 1
+	_build_blocked()
 	_build_jelly()
 	score = 0
 	stars = 0
@@ -1840,10 +1964,14 @@ func _all_moves() -> Array:
 	var out: Array = []
 	for r in ROWS:
 		for c in COLS:
-			if c + 1 < COLS and (special[r][c] != SP_NONE or special[r][c + 1] != SP_NONE
+			if not _is_open(r, c):
+				continue
+			if c + 1 < COLS and _is_open(r, c + 1) \
+					and (special[r][c] != SP_NONE or special[r][c + 1] != SP_NONE
 					or _swap_makes_match(Vector2i(c, r), Vector2i(c + 1, r))):
 				out.append([Vector2i(c, r), Vector2i(c + 1, r)])
-			if r + 1 < ROWS and (special[r][c] != SP_NONE or special[r + 1][c] != SP_NONE
+			if r + 1 < ROWS and _is_open(r + 1, c) \
+					and (special[r][c] != SP_NONE or special[r + 1][c] != SP_NONE
 					or _swap_makes_match(Vector2i(c, r), Vector2i(c, r + 1))):
 				out.append([Vector2i(c, r), Vector2i(c, r + 1)])
 	return out
@@ -1866,6 +1994,8 @@ func _find_any_move() -> Array:
 # --- deadlock detection and reshuffle -------------------------------------
 
 func _swap_makes_match(a: Vector2i, b: Vector2i) -> bool:
+	if not _is_open(a.y, a.x) or not _is_open(b.y, b.x):
+		return false
 	var ga: int = grid[a.y][a.x]
 	var gb: int = grid[b.y][b.x]
 	if ga == gb:
@@ -1884,10 +2014,12 @@ func _has_legal_move() -> bool:
 	# any special is itself a move: swapping one always sets it off
 	for r in ROWS:
 		for c in COLS:
-			if special[r][c] != SP_NONE:
+			if _is_open(r, c) and special[r][c] != SP_NONE:
 				return true
 	for r in ROWS:
 		for c in COLS:
+			if not _is_open(r, c):
+				continue
 			if c + 1 < COLS and _swap_makes_match(Vector2i(c, r), Vector2i(c + 1, r)):
 				return true
 			if r + 1 < ROWS and _swap_makes_match(Vector2i(c, r), Vector2i(c, r + 1)):
@@ -2047,6 +2179,14 @@ func _shot_special() -> void:
 	_show_combo(4, 880)
 	await get_tree().create_timer(0.45).timeout
 	await _save_shot("user://shot_special.png")
+	get_tree().quit()
+
+
+func _shot_shape() -> void:
+	await _start_level(8)
+	await get_tree().create_timer(0.4).timeout
+	await _save_shot("user://shot_shape.png")
+	music.stop()
 	get_tree().quit()
 
 
@@ -2604,6 +2744,71 @@ func _selftest() -> void:
 	await _next_level()
 	ok = _check("next_level", level, 2) and ok
 	ok = _check("next_level_target", target, int(level_table[2]["goal"]["score"])) and ok
+	_load_level(0)
+
+	# --- holey boards
+	_load_level(8)                      # a generated level with a board shape
+	await _settle()
+	var holes := 0
+	var hole := Vector2i(-1, -1)
+	for r in ROWS:
+		for c in COLS:
+			if not _is_open(r, c):
+				holes += 1
+				if hole.x < 0:
+					hole = Vector2i(c, r)
+	ok = _check("shape_has_holes", holes > 0, true) and ok
+
+	var bad_fill := 0
+	for r in ROWS:
+		for c in COLS:
+			if _is_open(r, c):
+				if grid[r][c] < 0 or pieces[r][c] == null:
+					bad_fill += 1
+			elif grid[r][c] >= 0 or pieces[r][c] != null:
+				bad_fill += 1
+	ok = _check("shape_fill_respects_holes", bad_fill, 0) and ok
+
+	# Clear the bottom of every column and let gravity run. Every open cell
+	# must refill and nothing may ever come to rest in a hole - this is the
+	# check that would catch collapse walking outside a column's open span.
+	var victims: Array = []
+	for c in COLS:
+		if col_bot[c] >= 0:
+			victims.append(Vector2i(c, col_bot[c]))
+	await _pop(victims)
+	await _collapse()
+	var bad_after := 0
+	for r in ROWS:
+		for c in COLS:
+			if _is_open(r, c):
+				if grid[r][c] < 0 or pieces[r][c] == null:
+					bad_after += 1
+			elif grid[r][c] >= 0 or pieces[r][c] != null:
+				bad_after += 1
+	ok = _check("shape_collapse_refills", bad_after, 0) and ok
+
+	var move_in_hole := false
+	for mv in _all_moves():
+		for cell in mv:
+			if not _is_open(cell.y, cell.x):
+				move_in_hole = true
+	ok = _check("shape_moves_skip_holes", move_in_hole, false) and ok
+	ok = _check("shape_click_ignores_hole",
+			_cell_at(_cell_pos(hole.y, hole.x)).x, -1) and ok
+
+	# A ring splits every column it touches, so it must be rejected outright
+	# rather than silently producing regions that can never refill.
+	board_shape = ["########", "#......#", "#.####.#", "#.#..#.#",
+			"#.#..#.#", "#.####.#", "#......#", "########"]
+	_build_blocked()
+	var still_blocked := 0
+	for r in ROWS:
+		for c in COLS:
+			if not _is_open(r, c):
+				still_blocked += 1
+	ok = _check("shape_rejects_split_column", still_blocked, 0) and ok
+	board_shape = []
 	_load_level(0)
 
 	# --- stars on goal levels come from moves left, not score

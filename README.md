@@ -185,6 +185,32 @@ adjusted here, because the right correction depends on how much a human
 outperforms random on *collect* specifically, and that wants playtesting rather
 than more proxy runs.
 
+### Board shapes
+
+Every third level narrows the board: cells can be **blocked**, giving shapes
+rather than always an 8x8 rectangle. Blocked cells hold no piece, never match,
+are not clickable, and are drawn as slabs of ice sitting in the pool.
+
+**Open cells must be contiguous within each column.** That invariant is what
+keeps falling straight down - a hole in the middle of a column would split it
+into regions with no way to refill the lower one, which is why real match-3
+games route pieces diagonally instead. Avoiding that routing is why this
+restriction exists, and `_build_blocked()` *enforces* it: a layout that splits
+any column is rejected and the board falls back to full, rather than silently
+producing a region that can never refill. A ring is the obvious shape this
+rules out, and there is a test feeding exactly that.
+
+Two shapes so far, both provably contiguous:
+
+- **corners** - `dx + dy <= extent`; 6.0 shaves the corners (60 of 64 open),
+  5.0 gives a chamfered square (52), 4.0 a diamond (40). Tightens by chapter.
+- **jagged** - steps cut from the *top* of each column only, which cannot break
+  contiguity whatever the pattern (56 of 64).
+
+Six checks cover it, the load-bearing one being `shape_collapse_refills`:
+it clears the bottom of every column, runs gravity, then asserts every open
+cell refilled and nothing came to rest in a hole.
+
 Goal kinds:Goal kinds:
 
 - **score** - reach a score. The original behaviour.
