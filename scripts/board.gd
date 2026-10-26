@@ -1624,12 +1624,12 @@ func _level_spec(n: int) -> Dictionary:
 	# budget tapers gently through a chapter, each chapter starting tighter
 	var moves: int = maxi(22 - step / 2 - chapter, 15)
 
-	# Magnitudes are derived from the move budget, not from n. The balance
-	# sweep fitted median score to roughly 75 * moves - 120, and a target at
-	# ~0.85x the median played as "challenging but fair", so pressure climbs
-	# from just under that and crosses it later on. Deriving from n alone gave
-	# a 4540 target on a 14-move level, which is unreachable.
-	var est_median: int = maxi(75 * moves - 120, 400)
+	# Magnitudes derive from the move budget, not from n. A sweep over the
+	# generated levels themselves refitted the median to 105 * moves - 525;
+	# the earlier 75 * moves - 120 was taken from a different rule set and
+	# undershot badly at high budgets. Deriving from n alone had given a 4540
+	# target on a 14-move level, which is simply unreachable.
+	var est_median: int = maxi(105 * moves - 525, 400)
 	# The hand-tuned levels sit near 0.95-1.0 of the estimated median, so the
 	# generated curve continues from there rather than restarting below them.
 	var pressure: float = 0.95 + 0.010 * idx
@@ -1690,12 +1690,15 @@ func _build_levels() -> void:
 	# The first six were balanced by hand and have been played, so they are
 	# pinned rather than regenerated - and they double as the worked example of
 	# how an override is written.
-	_override(1, {"species": 6, "moves": 22, "star_base": 1000,
-			"goal": {"kind": GOAL_SCORE, "score": 1000}})
+	# These targets were set when reaching one ENDED the level. Score levels
+	# now play the full budget, so 1000 in 22 moves is cleared by random play
+	# 20 times out of 20 - they are raised to stay meaningful.
+	_override(1, {"species": 6, "moves": 22, "star_base": 1250,
+			"goal": {"kind": GOAL_SCORE, "score": 1250}})
 	_override(2, {"species": 6, "moves": 22, "star_base": 1200,
 			"goal": {"kind": GOAL_COLLECT, "species": 0, "count": 16}})
-	_override(3, {"species": 6, "moves": 20, "star_base": 1350,
-			"goal": {"kind": GOAL_SCORE, "score": 1350}})
+	_override(3, {"species": 6, "moves": 20, "star_base": 1500,
+			"goal": {"kind": GOAL_SCORE, "score": 1500}})
 	_override(4, {"species": 6, "moves": 20, "star_base": 1500,
 			"goal": {"kind": GOAL_JELLY, "layout": JELLY_CENTER}})
 	_override(5, {"species": 6, "moves": 18, "star_base": 1650,
@@ -2101,38 +2104,47 @@ func _print_levels() -> void:
 
 
 func _balance() -> void:
-	# Play random legal moves with animation skipped, to see what each level's
-	# move budget actually yields. The target is then set from the mean.
+	"""Samples the generated curve: plays random legal moves with animation
+	skipped and reports, per level, the median score, the median goal progress
+	and - the figure that actually matters - how often random play clears it.
+
+	Random play is a weak proxy for a human, much weaker on jelly than on
+	score, so a clear rate near zero means the level is unreachable and a rate
+	near one means it is trivial. Somewhere in between is the target."""
 	await _start_level(0)
 	fast = true
 	no_finish = true
-	for i in level_table.size():
+	var trials := 20
+	var stride: int = maxi(level_table.size() / 8, 1)
+	print("  n  kind     mv  goal     score med  goal med  cleared")
+	for i in range(0, level_table.size(), stride):
 		var cfg: Dictionary = level_table[i]
-		var runs: Array = []
+		var budget: int = int(cfg["moves"])
+		var scores: Array = []
 		var goals: Array = []
-		for trial in 30:
+		var cleared := 0
+		for trial in trials:
 			_load_level(i)
 			await _settle()
-			for m in cfg["moves"]:
+			for m in budget:
 				var opts := _all_moves()
 				if opts.is_empty():
 					break
 				var mv: Array = opts[randi() % opts.size()]
 				await _try_swap(mv[0], mv[1])
-			runs.append(score)
-			goals.append(collected if int(goal["kind"]) == GOAL_COLLECT else _goal_done())
-			await get_tree().process_frame     # let freed nodes go
-		var total := 0
-		for v in runs:
-			total += v
-		var mean: int = total / runs.size()
-		runs.sort()
-		var median: int = runs[runs.size() / 2]
+			scores.append(score)
+			goals.append(collected if int(goal["kind"]) == GOAL_COLLECT
+					else _goal_done())
+			if _goal_met():
+				cleared += 1
+			await get_tree().process_frame
+		scores.sort()
 		goals.sort()
-		var gmed: int = goals[goals.size() / 2]
-		print("[balance] L%d moves=%2d  score med=%5d (min %4d max %5d)   goal med=%3d (min %3d max %3d) of %d"
-			% [i + 1, cfg["moves"], median, runs[0], runs[runs.size() - 1],
-			gmed, goals[0], goals[goals.size() - 1], _goal_total()])
+		var kinds := {GOAL_SCORE: "score", GOAL_COLLECT: "collect", GOAL_JELLY: "jelly"}
+		print("%3d  %-8s %2d  %-7s  %6d     %4d      %2d/%d"
+				% [i + 1, kinds[int(level_table[i]["goal"]["kind"])], budget,
+				_level_summary(i), scores[scores.size() / 2],
+				goals[goals.size() / 2], cleared, trials])
 	fast = false
 	no_finish = false
 	music.stop()

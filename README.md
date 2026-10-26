@@ -152,9 +152,38 @@ chapter and resets. Difficulty still climbs, via pressure - a lower target on a
 tighter budget is harder - but the numbers on the map do not read as a straight
 line. Smoothing it would mean a budget that only ever shrinks.
 
-This curve is a starting point. It has not had a full balance sweep; the
-magnitudes come from fitting the earlier measurements rather than from
-measuring the generated levels themselves.
+### What the sweep found
+
+`-- balance` samples every fourth level, 20 trials each, and reports how often
+random play **clears** the goal - the figure that matters, since a rate near
+zero means unreachable and near one means trivial.
+
+    godot4 --headless --path . -- balance
+
+Two things it caught:
+
+**Level 1 cleared 20 times out of 20.** Its 1000-point target was set when
+reaching one *ended* the level - it took a human three attempts under those
+rules. Score levels now play the full budget, so 22 moves reach 1000 almost
+regardless. Raising the pass mark is part of that rule change, not a separate
+decision; the pinned score targets went to 1250 and 1500.
+
+**The median model was wrong at high budgets.** Measured against the generated
+levels, median score fits `105 * moves - 525`; the earlier `75 * moves - 120`
+came from a different rule set and undershot by ~250 points at 22 moves. After
+refitting, score-level clear rates fell from 40-80% into 30-40%.
+
+Clear rates now run roughly: 90% at level 1, then 30-55%, with jelly at 10-15%.
+Jelly reads low because random play is a far weaker proxy there - it never aims
+at specific cells - so a human clears those far more often than the number
+suggests.
+
+**Still open:** collect levels clear at 40-65% against score levels' 30-40%,
+consistently across samples. That gap is larger than the ~11pp standard error
+at 20 trials, so the collect counts are probably a little soft. It is not
+adjusted here, because the right correction depends on how much a human
+outperforms random on *collect* specifically, and that wants playtesting rather
+than more proxy runs.
 
 Goal kinds:Goal kinds:
 
