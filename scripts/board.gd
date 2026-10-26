@@ -158,6 +158,9 @@ var bar_fill: ColorRect
 var overlay: ColorRect
 var result_label: Label
 var result_sub: Label
+var result_go: Button
+var menu_play: Button
+var result_retry: Button
 var voices: Array = []
 var voice_player: AudioStreamPlayer
 var idle_tex: Texture2D
@@ -207,6 +210,8 @@ func _ready() -> void:
 		_shot_win()
 	elif args.has("shotmenu"):
 		_shot_menu()
+	elif args.has("shotplay"):
+		_shot_play()
 	elif args.has("shotboost"):
 		_shot_boost()
 	elif args.has("shotgate"):
@@ -453,6 +458,18 @@ func _build_ui() -> void:
 	result_label.visible = false
 	hud_layer.add_child(result_label)
 
+	result_go = _button("LEVELS", Vector2(120, 436), Vector2(180, 48), 26)
+	result_go.z_index = 11
+	result_go.visible = false
+	result_go.pressed.connect(func(): _next_level())
+	hud_layer.add_child(result_go)
+
+	result_retry = _button("REPLAY", Vector2(340, 436), Vector2(180, 48), 26)
+	result_retry.z_index = 11
+	result_retry.visible = false
+	result_retry.pressed.connect(func(): _restart())
+	hud_layer.add_child(result_retry)
+
 	result_sub = Label.new()
 	result_sub.position = Vector2(0, 390)
 	result_sub.size = Vector2(640, 30)
@@ -582,8 +599,9 @@ func _build_menu() -> void:
 		sp.play("idle")
 		sp.frame = i % IDLE_DUR.size()
 
-	var play := _button("PLAY", Vector2(210, 348), Vector2(220, 54), 35)
-	play.pressed.connect(func(): _start_level(_next_unplayed()))
+	menu_play = _button("PLAY", Vector2(210, 348), Vector2(220, 54), 35)
+	var play := menu_play
+	play.pressed.connect(func(): _goto_select_at(_focus_level()))
 	menu_layer.add_child(play)
 	_hover_marks(play, 35)
 
@@ -826,6 +844,29 @@ func _is_unlocked(i: int) -> bool:
 	if int(best.get(i - 1, 0)) <= 0:
 		return false
 	return _total_stars() >= _chapter_gate(i / CHAPTER)
+
+
+func _focus_level() -> int:
+	"""The level the player is up to: the first unlocked one still unstarred,
+	or the furthest unlocked level once they are all cleared."""
+	var i: int = _next_unplayed()
+	if int(best.get(i, 0)) > 0:
+		for j in level_table.size():
+			if _is_unlocked(j):
+				i = j
+	return i
+
+
+func _scroll_to_level(i: int) -> void:
+	if map_scroll == null:
+		return
+	var y: float = _node_pos(clampi(i, 0, level_table.size() - 1)).y
+	map_scroll.scroll_vertical = int(maxf(y - 260.0, 0.0))
+
+
+func _goto_select_at(i: int) -> void:
+	_goto(ST_SELECT)
+	_scroll_to_level(i)
 
 
 func _next_unplayed() -> int:
@@ -2041,6 +2082,9 @@ func _hide_result() -> void:
 	overlay.visible = false
 	result_label.visible = false
 	result_sub.visible = false
+	if result_go != null:
+		result_go.visible = false
+		result_retry.visible = false
 	for n in star_nodes:
 		n.visible = false
 
@@ -2072,16 +2116,17 @@ func _finish(did_win: bool) -> void:
 	result_label.text = "LEVEL CLEARED!" if won else "OUT OF MOVES"
 	result_label.add_theme_color_override("font_color",
 		Color("9fe3ff") if won else Color("ff95bb"))
-	if won and level + 1 < level_table.size():
-		result_sub.text = "score %d          SPACE for level %d     R to replay" \
-			% [score, level + 2]
+	if won and level + 1 >= level_table.size():
+		result_sub.text = "score %d          all levels cleared!" % score
 	elif won:
-		result_sub.text = "score %d          all levels cleared!     ESC for levels" % score
+		result_sub.text = "score %d" % score
 	else:
-		result_sub.text = "score %d of %d          R to try again" % [score, target]
+		result_sub.text = "score %d of %d" % [score, target]
 	overlay.visible = true
 	result_label.visible = true
 	result_sub.visible = true
+	result_go.visible = true
+	result_retry.visible = true
 	for i in 3:
 		star_nodes[i].texture = star_full if i < stars else star_empty
 		star_nodes[i].visible = won
@@ -2341,13 +2386,10 @@ func _restart() -> void:
 
 
 func _next_level() -> void:
-	if level + 1 >= level_table.size() or not _is_unlocked(level + 1):
-		_goto(ST_SELECT)      # gated, or there is nothing after this
-		return
-	busy = true
-	_load_level(level + 1)
-	await _settle()
-	busy = false
+	# Clearing a level returns to the map rather than diving straight into the
+	# next one: the stars just banked, the progress toward the gate ahead and
+	# the choice of what to replay are all on that screen.
+	_goto_select_at(mini(level + 1, level_table.size() - 1))
 
 
 # --- dev harnesses --------------------------------------------------------
@@ -2425,6 +2467,19 @@ func _shot_select() -> void:
 	_goto(ST_SELECT)
 	await get_tree().create_timer(0.4).timeout
 	await _save_shot("user://shot_select.png")
+	music.stop()
+	get_tree().quit()
+
+
+func _shot_play() -> void:
+	# dev: PLAY from the menu lands on the map at the level you are up to
+	for i in 12:
+		best[i] = 2
+	_goto(ST_MENU)
+	await get_tree().create_timer(0.3).timeout
+	menu_play.pressed.emit()
+	await get_tree().create_timer(0.4).timeout
+	await _save_shot("user://shot_play.png")
 	music.stop()
 	get_tree().quit()
 
@@ -2985,9 +3040,32 @@ func _selftest() -> void:
 	_check_outcome()
 	ok = _check("best_not_lowered", int(best.get(1, 0)), 2) and ok
 
-	await _next_level()
-	ok = _check("next_level", level, 2) and ok
-	ok = _check("next_level_target", target, int(level_table[2]["goal"]["score"])) and ok
+	# --- PLAY and the end of a level both land on the map, never in a level
+	var saved_best2: Dictionary = best.duplicate()
+	best = {}
+	for i in 12:
+		best[i] = 2                             # 24 stars: chapter 2 is open
+	_goto(ST_MENU)
+	menu_play.pressed.emit()
+	ok = _check("play_opens_map", state, ST_SELECT) and ok
+	ok = _check("play_focuses_next", _focus_level(), 12) and ok
+	await get_tree().process_frame
+	ok = _check("map_scrolled_to_focus", map_scroll.scroll_vertical,
+			int(maxf(_node_pos(12).y - 260.0, 0.0))) and ok
+	for i in level_table.size():
+		best[i] = 3                             # all cleared: park at the end
+	ok = _check("focus_is_last_when_cleared", _focus_level(),
+			level_table.size() - 1) and ok
+
+	await _start_level(5)
+	_finish(true)
+	ok = _check("result_offers_a_way_out", result_go.visible, true) and ok
+	ok = _check("result_offers_replay", result_retry.visible, true) and ok
+	result_go.pressed.emit()                    # the button, not the keyboard
+	ok = _check("finish_returns_to_map", state, ST_SELECT) and ok
+	ok = _check("result_hidden_on_leaving", result_go.visible, false) and ok
+	best = saved_best2
+	_goto(ST_PLAY)
 	_load_level(0)
 
 	# --- holey boards

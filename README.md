@@ -108,12 +108,17 @@ Three screens, toggled by node layer (`menu_layer`, `select_layer`,
 `board_layer` + `hud_layer`) off a `state` variable:
 
 - **Menu** - title over the aurora, the six critters idling on an ice shelf,
-  PLAY / LEVELS / QUIT. PLAY jumps to the first level with no stars yet.
+  PLAY / LEVELS / QUIT. PLAY opens the map scrolled to the level you are up
+  to - the first unlocked one still unstarred, or the furthest unlocked level
+  once they are all cleared. LEVELS opens the same map from the top.
 - **Level select** - a scrolling map of ice floes with each level's move
   budget, goal summary and earned stars, laid over its own pool scene. A level
   unlocks once the one before it has at least one star *and* its chapter's star
   gate is paid.
-- **Play** - the board.
+- **Play** - the board. Clearing a level returns to the map rather than diving
+  into the next one, so the stars just banked and the gate ahead are both in
+  view; the result overlay carries LEVELS and REPLAY buttons, because `SPACE`
+  and `ESC` are no use on the phones this build is shared with.
 
 `ESC` steps back one screen and only quits from the menu. `M` mutes anywhere.
 
