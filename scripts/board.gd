@@ -55,9 +55,6 @@ const LEVELS := [
 ]
 const STAR_2 := 1.3          # multiples of target
 const STAR_3 := 1.6
-# Screen y where the select scene's pool ends (bg_play water bottom, base
-# y341 at 2x). Rows below this spill onto the snow and stop being readable.
-const SELECT_FLOOR := 682.0
 const SAVE_PATH := "user://progress.cfg"
 
 # goal kinds
@@ -125,6 +122,8 @@ var state := ST_MENU
 var select_buttons: Array = []
 var select_stars: Array = []
 var select_back: Button
+var map_content: Control
+var node_faces: Array = []
 var jelly: Array = []          # jelly[r][c] layers left on that cell, 0 = none
 var jelly_left := 0
 var collected := 0             # pieces of the goal species cleared this level
@@ -563,42 +562,101 @@ func _build_menu() -> void:
 			Color(0.13, 0.21, 0.33, 0.95), false))
 
 
-func _build_select() -> void:
-	select_layer.add_child(_screen_label("SELECT LEVEL", 78, 28, Color("bdeeff"), true))
-	for i in LEVELS.size():
-		var y := 170.0 + i * 76.0
+func _disc(radius: float, col: Color, sides: int = 22) -> Polygon2D:
+	var pts := PackedVector2Array()
+	for k in sides:
+		var a := TAU * k / float(sides)
+		pts.append(Vector2(cos(a) * radius, sin(a) * radius))
+	var pg := Polygon2D.new()
+	pg.polygon = pts
+	pg.color = col
+	return pg
 
-		var b := _button("LEVEL %d" % (i + 1), Vector2(92, y), Vector2(148, 52), 21)
+
+func _node_pos(i: int) -> Vector2:
+	# a winding trail: the path is generated, so it extends to any level count
+	return Vector2(320.0 + 150.0 * sin(i * 0.95), 54.0 + i * 118.0)
+
+
+func _build_select() -> void:
+	select_layer.add_child(_screen_label("SELECT LEVEL", 54, 28, Color("bdeeff"), true))
+
+	# A scrolling map rather than a fixed list: the old rows were absolutely
+	# positioned and fitted exactly six levels before colliding with BACK.
+	var scroll := ScrollContainer.new()
+	scroll.position = Vector2(0, 104)
+	scroll.size = Vector2(640, 580)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	select_layer.add_child(scroll)
+
+	map_content = Control.new()
+	var last := _node_pos(LEVELS.size() - 1)
+	map_content.custom_minimum_size = Vector2(640, last.y + 110.0)
+	scroll.add_child(map_content)
+
+	# stepping-stone trail between the floes
+	for i in LEVELS.size() - 1:
+		var a := _node_pos(i)
+		var b := _node_pos(i + 1)
+		for k in range(1, 5):
+			var dot := _disc(4.0, Color(0.82, 0.92, 0.99, 0.72), 8)
+			dot.position = a.lerp(b, k / 5.0)
+			map_content.add_child(dot)
+
+	for i in LEVELS.size():
+		var c := _node_pos(i)
+
+		map_content.add_child(_disc_at(c, 34.0, Color(0.05, 0.13, 0.22, 0.75)))
+		var face := _disc(29.0, Color("cfe6f6"))
+		face.position = c
+		map_content.add_child(face)
+		node_faces.append(face)
+
+		var b := _button(str(i + 1), Vector2(c.x - 34.0, c.y - 34.0), Vector2(68, 68), 28)
+		# the floe face is pale, so the number inverts to dark
+		b.add_theme_color_override("font_color", Color("17395c"))
+		b.add_theme_color_override("font_hover_color", Color("0d2137"))
+		b.add_theme_color_override("font_pressed_color", Color("2a6d9c"))
+		b.add_theme_color_override("font_disabled_color", Color(0.22, 0.30, 0.40, 0.85))
+		b.add_theme_constant_override("shadow_offset_x", 0)
+		b.add_theme_constant_override("shadow_offset_y", 0)
 		b.pressed.connect(_start_level.bind(i))
-		select_layer.add_child(b)
+		map_content.add_child(b)
 		select_buttons.append(b)
 
 		var info := Label.new()
-		info.text = "%d moves    %s" % [LEVELS[i]["moves"], _level_summary(i)]
-		info.position = Vector2(248, y + 18)
+		info.text = "%d MOVES   %s" % [LEVELS[i]["moves"], _level_summary(i)]
+		info.position = Vector2(c.x - 150.0, c.y + 60.0)
+		info.size = Vector2(300, 20)
+		info.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		_font(info, 14, Color(0.88, 0.95, 1.0, 0.85))
-		select_layer.add_child(info)
+		info.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		map_content.add_child(info)
 
 		var row: Array = []
 		for j in 3:
-			var tr := _star_rect(Vector2(474 + j * 30, y + 14))
-			select_layer.add_child(tr)
+			var tr := _star_rect(Vector2(c.x - 31.0 + j * 22.0, c.y + 37.0))
+			tr.scale = Vector2(1.2, 1.2)
+			map_content.add_child(tr)
 			row.append(tr)
 		select_stars.append(row)
 
-	var back := _button("BACK", Vector2(250, 610), Vector2(140, 46), 21)
-	select_back = back
-	back.pressed.connect(func(): _goto(ST_MENU))
-	select_layer.add_child(back)
-	select_layer.add_child(_screen_label("CLEAR A LEVEL TO UNLOCK THE NEXT", 684, 14,
-			Color(0.13, 0.21, 0.33, 0.95), false))
+	select_back = _button("BACK", Vector2(250, 700), Vector2(140, 46), 21)
+	select_back.pressed.connect(func(): _goto(ST_MENU))
+	select_layer.add_child(select_back)
+
+
+func _disc_at(centre: Vector2, radius: float, col: Color) -> Polygon2D:
+	var pg := _disc(radius, col)
+	pg.position = centre
+	return pg
 
 
 func _refresh_select() -> void:
 	for i in LEVELS.size():
 		var unlocked: bool = i == 0 or int(best.get(i - 1, 0)) > 0
 		select_buttons[i].disabled = not unlocked
-		select_buttons[i].text = "LEVEL %d" % (i + 1) if unlocked else "LOCKED"
+		node_faces[i].color = Color("cfe6f6") if unlocked else Color(0.42, 0.52, 0.62, 0.75)
 		var earned: int = int(best.get(i, 0))
 		for j in 3:
 			select_stars[i][j].texture = star_full if j < earned else star_empty
@@ -1536,10 +1594,15 @@ func _hide_result() -> void:
 func _check_outcome() -> void:
 	if game_over or no_finish:
 		return
-	if _goal_met():
+	# A collect or jelly goal has nothing left to do once met, so it ends.
+	# A score goal does not: the target is the pass mark, and the remaining
+	# moves are how you reach 2 and 3 stars. Ending on the target made those
+	# unreachable except by overshooting in a final cascade.
+	var kind: int = int(goal.get("kind", GOAL_SCORE))
+	if _goal_met() and kind != GOAL_SCORE:
 		_finish(true)
 	elif moves_left <= 0:
-		_finish(false)
+		_finish(_goal_met())
 
 
 func _finish(did_win: bool) -> void:
@@ -2162,15 +2225,15 @@ func _selftest() -> void:
 	ok = _check("hud_no_overlap", goal_right < combo_left, true) and ok
 	_load_level(0)
 
-	# The select rows are absolutely positioned with no scrolling, so the list
-	# silently outgrows the screen as levels are added - it fits exactly six.
-	# Measured from the real nodes, not by redoing the layout arithmetic, so
-	# the check cannot drift from the code it guards.
-	var last_row: Button = select_buttons[select_buttons.size() - 1]
-	var rows_bottom: float = last_row.position.y + last_row.size.y
-	ok = _check("levels_clear_back_button",
-			rows_bottom < select_back.position.y, true) and ok
-	ok = _check("levels_within_pool", rows_bottom < SELECT_FLOOR, true) and ok
+	# The map generates its path, so it holds any level count - but only if the
+	# scroll content grows with it. Measured from the real nodes so the check
+	# cannot drift from the layout.
+	var last_node: Button = select_buttons[select_buttons.size() - 1]
+	var node_bottom: float = last_node.position.y + last_node.size.y + 60.0  # stars + info
+	ok = _check("map_holds_every_level",
+			node_bottom <= map_content.custom_minimum_size.y, true) and ok
+	ok = _check("map_node_count", select_buttons.size(), LEVELS.size()) and ok
+	ok = _check("map_scrolls", map_content.custom_minimum_size.y > 0.0, true) and ok
 	# the top slice must line up with the board origin or the seam shows
 	var slice: AtlasTexture = bg_front.texture
 	ok = _check("bg_front_slice", slice.region.size.y * 2.0, ORIGIN.y) and ok
@@ -2247,7 +2310,20 @@ func _selftest() -> void:
 	score = target
 	moves_left = 5
 	_check_outcome()
-	ok = _check("level_win", game_over and won, true) and ok
+	ok = _check("score_goal_runs_on", game_over, false) and ok
+	moves_left = 0
+	_check_outcome()
+	ok = _check("score_goal_wins_at_end", game_over and won, true) and ok
+
+	# a collect goal still ends the moment it is met
+	_load_level(1)
+	collected = int(LEVELS[1]["goal"]["count"])
+	moves_left = 5
+	_check_outcome()
+	ok = _check("collect_goal_ends_early", game_over and won, true) and ok
+	_load_level(0)
+	game_over = false
+	won = false
 
 	game_over = false
 	won = false

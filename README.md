@@ -392,26 +392,27 @@ only the `web_*` members costs **84 MB instead of 1,222 MB**.
 
 With `thread_support=false` the exporter uses `web_nothreads_release.zip`.
 
-### Level-select capacity
+### Level map
 
-The select rows are absolutely positioned (`y = 170 + i * 76`) with no
-scrolling, so the list fits **exactly six levels**:
+Level select is a **scrolling map**: a winding trail of ice floes across the
+frozen pool, one per level, each showing its number, move budget, goal and
+earned stars. Locked floes are dimmed. The path is generated -
 
-| Levels | Result |
-|---|---|
-| 6 | fits |
-| 7 | the row collides with the BACK button |
-| 8 | falls outside the pool and off the 760px window |
+    Vector2(320 + 150 * sin(i * 0.95), 54 + i * 118)
 
-`levels_clear_back_button` and `levels_within_pool` measure the real node
-positions and fail the moment that happens, so adding a seventh level breaks
-the suite - and therefore the deploy - instead of quietly looking broken.
-Verified by temporarily adding a seventh level and confirming exit code 1.
+- so it extends to any level count, and the scroll content grows with it. This
+replaced a fixed list of absolutely positioned rows that fitted exactly six
+levels before colliding with the BACK button.
 
-Scaling past six needs a layout change, not a tweak: a `ScrollContainer`, pages
-of six, or a proper level map.
+`map_holds_every_level` asserts the scroll content is tall enough for the last
+node's full extent (disc, stars and info line), measured from the real nodes
+rather than by redoing the layout arithmetic.
 
-## Dev harnesses
+Spacing is 118px, not 100: at 100 each node's info line landed inside the next
+floe's disc. The numbers invert to dark on the pale floe face - inherited light
+button text was invisible there.
+
+## Dev harnesses## Dev harnesses
 
     godot4 --path . --headless -- selftest   # 13 checks: classification, blasts, cascade
     godot4 --path . -- shot                  # screenshot the board
