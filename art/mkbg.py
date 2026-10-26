@@ -194,7 +194,99 @@ def compose_play():
     K.write_png(os.path.join(OUT, 'bg_play.png'))
 
 
+
+
+# --- map: a channel winding down between ice banks ------------------------
+
+def channel(y):
+    """Meandering water lane. The level trail runs base x85-235, so the lane is
+    kept wide enough to hold it at every scroll offset."""
+    cx = 160.0 + 26.0 * math.sin(y / 58.0) + 8.0 * math.sin(y / 23.0)
+    half = 88.0 + 6.0 * math.sin(y / 41.0)
+    return cx - half, cx + half
+
+
+def compose_map():
+    random.seed(53)
+    K.reset()
+
+    # sky strip behind the screen title
+    K.vgrad(0, 30, rgb('#101631'), rgb('#27365e'))
+    K.aurora([(rgb('#4fd1a5'), 11.0, 5.0, 43.0, 0.28, 6),
+              (rgb('#a884e8'), 19.0, 4.0, 59.0, 0.15, 5)])
+    K.stars(40, 0, 26, big=3)
+    K.moon(272, 12, r=4, halo=11)
+    K.ridge(lambda x: 24 + 5 * math.sin(x / 39.0) + 3 * math.sin(x / 13.0),
+            48, rgb('#3c4f74'), rgb('#cfe4f5'))
+    K.ridge(lambda x: 34 + 4 * math.sin(x / 25.0 + 2.0) + 2 * math.sin(x / 9.0),
+            48, rgb('#2b3a5c'), rgb('#aecbe4'))
+
+    # the ice field the lane is cut from
+    K.vgrad(44, H, rgb('#cadff1'), rgb('#9dc0dd'))
+    for x in range(W):
+        top = int(44 + 3 * math.sin(x / 17.0) + 2 * math.sin(x / 6.0 + 1.0))
+        for y in range(top, min(top + 3, H)):
+            blend(x, y, rgb('#f2fbff'), 0.9 - (y - top) * 0.25)
+    for _ in range(46):
+        mx, my = random.randrange(W), random.randrange(48, H)
+        rw, rh = random.randrange(9, 24), random.randrange(3, 7)
+        for dy in range(-rh, rh + 1):
+            for dx in range(-rw, rw + 1):
+                d = math.hypot(dx / float(rw), dy / float(rh))
+                if d <= 1.0:
+                    up = rgb('#eaf6ff') if dy < 0 else rgb('#a9c8e0')
+                    blend(mx + dx, my + dy, up, 0.30 * (1.0 - d))
+    for _ in range(40):
+        cx, cy = random.randrange(W), random.randrange(48, H)
+        ln = random.randrange(5, 18)
+        ang = random.uniform(0, math.pi)
+        for t in range(ln):
+            blend(cx + math.cos(ang) * t, cy + math.sin(ang) * t, rgb('#8fb2cf'), 0.30)
+
+    # carve the lane
+    for y in range(46, H):
+        x0, x1 = channel(y)
+        t = (y - 46) / float(H - 46)
+        col = lerp(rgb('#2b5273'), rgb('#15293f'), t)
+        for x in range(int(math.ceil(x0)), int(x1) + 1):
+            blend(x, y, col, 1.0)
+        for d, xx in ((1, x0), (-1, x1)):
+            blend(xx - d, y, rgb('#f4fbff'), 0.95)
+            blend(xx - d * 2, y, rgb('#cfe6f6'), 0.55)
+            blend(xx + d, y, rgb('#0f2235'), 0.35)
+
+    # lazy surface movement, kept faint so it never fights the level discs
+    for y in range(48, H):
+        x0, x1 = channel(y)
+        for x in range(int(x0) + 2, int(x1) - 1):
+            if (y + int(4 * math.sin(x / 15.0))) % 17 == 0:
+                blend(x, y, rgb('#bfe4f7'), 0.05)
+            if (y + int(3 * math.sin(x / 11.0))) % 29 == 0:
+                blend(x, y, rgb('#6fe0b8'), 0.05)
+
+    # bergs on the banks, a couple of small floes adrift in the lane
+    def shadowed(cx, by, pts, sc):
+        for dx in range(-int(15 * sc), int(15 * sc)):
+            blend(cx + dx + 3, by + 1, rgb('#8aadc9'), 0.33)
+        K.berg(cx, by, pts, sc, reflect=False)
+
+    shadowed(22, 92, MID, 0.8)
+    shadowed(298, 76, MID, 0.75)
+    shadowed(16, 214, LOW, 0.9)
+    shadowed(305, 198, MID, 0.7)
+    shadowed(30, 330, LOW, 0.8)
+    shadowed(292, 348, MID, 0.8)
+    K.berg(118, 150, FLOE, 0.55, reflect=False)
+    K.berg(214, 268, FLOE, 0.5, reflect=False)
+
+    K.penguin(286, 288, 8)
+    K.lantern(34, 268, reach=6)
+    K.specks(80, 46, H, 0.05, 0.16)
+    K.write_png(os.path.join(OUT, 'bg_map.png'))
+
+
 compose_menu()
 compose_play()
+compose_map()
 K.write_fade(os.path.join(OUT, 'ui_fade_top.png'), 80, 0.80, 0.0)
 K.write_fade(os.path.join(OUT, 'ui_fade_bot.png'), 44, 0.0, 0.84)

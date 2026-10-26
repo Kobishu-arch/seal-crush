@@ -113,6 +113,7 @@ var ui_font: Font
 var menu_marks: Array = []
 var bg_menu_tex: Texture2D
 var bg_play_tex: Texture2D
+var bg_map_tex: Texture2D
 var board_layer: Node2D
 var jelly_layer: Node2D
 var hud_layer: Node2D
@@ -124,6 +125,7 @@ var select_stars: Array = []
 var select_back: Button
 var map_content: Control
 var node_faces: Array = []
+var node_numbers: Array = []
 var jelly: Array = []          # jelly[r][c] layers left on that cell, 0 = none
 var jelly_left := 0
 var collected := 0             # pieces of the goal species cleared this level
@@ -275,8 +277,9 @@ func _build_ui() -> void:
 	add_child(bg_layer)
 	bg_menu_tex = load("res://assets/bg_menu.png")
 	bg_play_tex = load("res://assets/bg_play.png")
-	assert(bg_menu_tex != null and bg_play_tex != null,
-			"assets/bg_menu.png or bg_play.png missing or not imported")
+	bg_map_tex = load("res://assets/bg_map.png")
+	assert(bg_menu_tex != null and bg_play_tex != null and bg_map_tex != null,
+			"a background scene is missing or not imported")
 	bg_back = Sprite2D.new()
 	bg_back.texture = bg_menu_tex
 	bg_back.centered = false
@@ -451,14 +454,14 @@ func _button(text: String, pos: Vector2, size: Vector2, font_size: int = 22) -> 
 	return b
 
 
-func _screen_label(text: String, y: float, font_size: int, col: Color,
-		outline: bool = false) -> Control:
+func _outlined(text: String, pos: Vector2, size: Vector2, font_size: int,
+		col: Color, outline: bool = true) -> Control:
 	# Godot ignores outline_size for bitmap fonts - it builds outlines from
 	# vector glyph data - so thin pixel strokes get an outline the manual way,
 	# from eight offset copies behind the real label.
 	var root := Control.new()
-	root.position = Vector2(0, y)
-	root.size = Vector2(640, font_size + 14)
+	root.position = pos
+	root.size = size
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	if outline:
 		for o in [Vector2(-2, 0), Vector2(2, 0), Vector2(0, -2), Vector2(0, 2),
@@ -466,19 +469,25 @@ func _screen_label(text: String, y: float, font_size: int, col: Color,
 			var sh := Label.new()
 			sh.text = text
 			sh.position = o
-			sh.size = root.size
+			sh.size = size
 			sh.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 			sh.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			_font(sh, font_size, Color(0.02, 0.06, 0.14, 0.95), false)
 			root.add_child(sh)
 	var l := Label.new()
 	l.text = text
-	l.size = root.size
+	l.size = size
 	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_font(l, font_size, col, false)
 	root.add_child(l)
 	return root
+
+
+func _screen_label(text: String, y: float, font_size: int, col: Color,
+		outline: bool = false) -> Control:
+	return _outlined(text, Vector2(0, y), Vector2(640, font_size + 14),
+			font_size, col, outline)
 
 
 func _star_rect(pos: Vector2) -> TextureRect:
@@ -573,6 +582,27 @@ func _disc(radius: float, col: Color, sides: int = 22) -> Polygon2D:
 	return pg
 
 
+func _floe_points(r: float, sides: int, seed_i: int) -> PackedVector2Array:
+	"""An angular, slightly irregular chunk of ice. Deterministic per level, so
+	each floe has its own shape but never changes between runs."""
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7700 + seed_i
+	var pts := PackedVector2Array()
+	for k in sides:
+		var a: float = TAU * k / float(sides) + rng.randf_range(-0.10, 0.10)
+		var rr: float = r * rng.randf_range(0.84, 1.06)
+		pts.append(Vector2(cos(a) * rr, sin(a) * rr))
+	return pts
+
+
+func _floe(r: float, col: Color, seed_i: int, offset := Vector2.ZERO) -> Polygon2D:
+	var pg := Polygon2D.new()
+	pg.polygon = _floe_points(r, 9, seed_i)
+	pg.color = col
+	pg.position = offset
+	return pg
+
+
 func _node_pos(i: int) -> Vector2:
 	# a winding trail: the path is generated, so it extends to any level count
 	return Vector2(320.0 + 150.0 * sin(i * 0.95), 54.0 + i * 118.0)
@@ -606,20 +636,23 @@ func _build_select() -> void:
 	for i in LEVELS.size():
 		var c := _node_pos(i)
 
-		map_content.add_child(_disc_at(c, 34.0, Color(0.05, 0.13, 0.22, 0.75)))
-		var face := _disc(29.0, Color("cfe6f6"))
-		face.position = c
+		# a chunk of ice, shaded like the bergs: dark rim, mid face, lit facet
+		var rim := _floe(35.0, Color(0.05, 0.12, 0.21, 0.80), i, c)
+		map_content.add_child(rim)
+		var face := _floe(30.0, Color("a7cde8"), i, c)
 		map_content.add_child(face)
-		node_faces.append(face)
+		var facet := _floe(21.0, Color("e6f4ff"), i, c + Vector2(-4, -5))
+		map_content.add_child(facet)
+		node_faces.append([face, facet])
 
-		var b := _button(str(i + 1), Vector2(c.x - 34.0, c.y - 34.0), Vector2(68, 68), 28)
-		# the floe face is pale, so the number inverts to dark
-		b.add_theme_color_override("font_color", Color("17395c"))
-		b.add_theme_color_override("font_hover_color", Color("0d2137"))
-		b.add_theme_color_override("font_pressed_color", Color("2a6d9c"))
-		b.add_theme_color_override("font_disabled_color", Color(0.22, 0.30, 0.40, 0.85))
-		b.add_theme_constant_override("shadow_offset_x", 0)
-		b.add_theme_constant_override("shadow_offset_y", 0)
+		# the number gets the same treatment as every other heading in the game:
+		# light fill with a dark outline, rather than bare dark-on-pale
+		var num := _outlined(str(i + 1), Vector2(c.x - 34.0, c.y - 20.0),
+				Vector2(68, 40), 28, Color("f4fbff"))
+		map_content.add_child(num)
+		node_numbers.append(num)
+
+		var b := _button("", Vector2(c.x - 34.0, c.y - 34.0), Vector2(68, 68), 28)
 		b.pressed.connect(_start_level.bind(i))
 		map_content.add_child(b)
 		select_buttons.append(b)
@@ -646,17 +679,13 @@ func _build_select() -> void:
 	select_layer.add_child(select_back)
 
 
-func _disc_at(centre: Vector2, radius: float, col: Color) -> Polygon2D:
-	var pg := _disc(radius, col)
-	pg.position = centre
-	return pg
-
-
 func _refresh_select() -> void:
 	for i in LEVELS.size():
 		var unlocked: bool = i == 0 or int(best.get(i - 1, 0)) > 0
 		select_buttons[i].disabled = not unlocked
-		node_faces[i].color = Color("cfe6f6") if unlocked else Color(0.42, 0.52, 0.62, 0.75)
+		node_faces[i][0].color = Color("a7cde8") if unlocked else Color(0.40, 0.49, 0.58, 0.80)
+		node_faces[i][1].color = Color("e6f4ff") if unlocked else Color(0.52, 0.60, 0.68, 0.80)
+		node_numbers[i].modulate.a = 1.0 if unlocked else 0.45
 		var earned: int = int(best.get(i, 0))
 		for j in 3:
 			select_stars[i][j].texture = star_full if j < earned else star_empty
@@ -693,7 +722,13 @@ func _goto(s: int) -> void:
 	board_layer.visible = s == ST_PLAY
 	jelly_layer.visible = s == ST_PLAY
 	bg_front.visible = s == ST_PLAY
-	bg_back.texture = bg_menu_tex if s == ST_MENU else bg_play_tex
+	# each screen has its own scene: vista, channel, pool
+	if s == ST_MENU:
+		bg_back.texture = bg_menu_tex
+	elif s == ST_SELECT:
+		bg_back.texture = bg_map_tex
+	else:
+		bg_back.texture = bg_play_tex
 	hud_layer.visible = s == ST_PLAY
 	if s != ST_PLAY:
 		_hide_result()
@@ -2193,6 +2228,8 @@ func _selftest() -> void:
 	ok = _check("audio_voices", voices_ok, true) and ok
 	ok = _check("star_texture", star_full != null and star_full.atlas != null, true) and ok
 	ok = _check("bg_texture", bg_back != null and bg_back.texture != null, true) and ok
+	ok = _check("bg_three_scenes",
+			bg_menu_tex != null and bg_play_tex != null and bg_map_tex != null, true) and ok
 	ok = _check("font_loaded", ui_font != null, true) and ok
 	# the font is caps-only by design; without the a-z aliases every lowercase
 	# string in the UI rendered as tofu boxes

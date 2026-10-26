@@ -21,6 +21,9 @@ Click two neighbouring pieces to swap. A swap that makes no match reverts.
 - **`bg_menu.png`** - a wide vista: aurora sky, two snow-capped ridges, a
   frozen sea of faceted bergs, a wide ice shelf the menu critters stand on, and
   a near bank with a glowing igloo.
+- **`bg_map.png`** - the level map's own scene: a lane of water meandering down
+  between ice banks, with bergs on the banks and floes adrift. A vertical trail
+  wants a channel, not the board's square pool, which select had been borrowing.
 - **`bg_play.png`** - the board as a **pool of water cut into an ice field**.
   The water overhangs the board rect by 5px so its deliberately irregular edge
   never reaches a playable cell; a bright ice lip rims it with a shadow cast
@@ -394,9 +397,18 @@ With `thread_support=false` the exporter uses `web_nothreads_release.zip`.
 
 ### Level map
 
-Level select is a **scrolling map**: a winding trail of ice floes across the
-frozen pool, one per level, each showing its number, move budget, goal and
-earned stars. Locked floes are dimmed. The path is generated -
+Level select is a **scrolling map**: a winding trail of ice floes down a water
+channel, one per level, each showing its number, move budget, goal and earned
+stars. Locked floes are dimmed.
+
+Each marker is a real chunk of ice, not a disc - a 9-sided irregular polygon
+with a dark rim, a mid-tone face and a lit facet offset up-left, shaded like
+the bergs. The shape is seeded per level, so every floe differs but none of
+them change between runs.
+
+The numbers take the same treatment as every other heading: light fill with
+the eight-copy dark outline. They were already the pixel font - a 4x zoom
+confirmed it - but bare dark-on-pale read as a UI widget rather than game art. The path is generated -
 
     Vector2(320 + 150 * sin(i * 0.95), 54 + i * 118)
 
