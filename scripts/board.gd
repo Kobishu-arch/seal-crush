@@ -1,0 +1,2385 @@
+extends Node2D
+
+# Match-3 prototype driven by the critter sheets.
+#   idle    sheet: 4 frames across, 6 species down
+#   pop     sheet: 8 frames across, 6 species down
+#   special sheet: 12 across (stripe_h x4, stripe_v x4, wrapped x4), 6 down
+#   bomb    sheet: 4 frames across, species independent
+
+const COLS := 8
+const ROWS := 8
+const CELL := 64
+const SPECIES := 6
+const IDLE_DUR := [0.35, 0.25, 0.25, 0.09]
+const POP_DUR := [0.06, 0.05, 0.05, 0.05, 0.06, 0.06, 0.05, 0.08]
+const ORIGIN := Vector2(64, 160)
+const BG := Color("0d2137")
+# Jelly layouts: '.' none, '1' one layer, '2' two.
+const JELLY_CENTER := [
+	"........",
+	"........",
+	"..1111..",
+	"..1111..",
+	"..1111..",
+	"..1111..",
+	"........",
+	"........",
+]
+const JELLY_WIDE := [
+	"........",
+	"...11...",
+	".111111.",
+	".111111.",
+	".111111.",
+	".111111.",
+	"...11...",
+	"........",
+]
+
+# Each level: a move budget, a goal that decides win/lose, and star_base - the
+# score the star ratings key off, so a collect or jelly level still rewards
+# playing well. Counts come from the balance harness, not guesswork.
+const LEVELS := [
+	{"moves": 22, "star_base": 1000,
+		"goal": {"kind": GOAL_SCORE, "score": 1000}},
+	{"moves": 22, "star_base": 1200,
+		"goal": {"kind": GOAL_COLLECT, "species": 0, "count": 16}},
+	{"moves": 20, "star_base": 1350,
+		"goal": {"kind": GOAL_SCORE, "score": 1350}},
+	{"moves": 20, "star_base": 1500,
+		"goal": {"kind": GOAL_JELLY, "layout": JELLY_CENTER}},
+	{"moves": 18, "star_base": 1650,
+		"goal": {"kind": GOAL_COLLECT, "species": 3, "count": 18}},
+	{"moves": 22, "star_base": 1700,
+		"goal": {"kind": GOAL_JELLY, "layout": JELLY_WIDE}},
+]
+const STAR_2 := 1.3          # multiples of target
+const STAR_3 := 1.6
+const SAVE_PATH := "user://progress.cfg"
+
+# goal kinds
+const GOAL_SCORE := 0
+const GOAL_COLLECT := 1
+const GOAL_JELLY := 2
+
+const SPECIES_NAMES := ["seals", "penguins", "otters", "walruses", "narwhals", "bears"]
+# short forms for the level list, where the pixel font leaves little room
+const SPECIES_SHORT := ["SEAL", "PENG", "OTTR", "WALR", "NARW", "BEAR"]
+
+# screens
+const ST_MENU := 0
+const ST_SELECT := 1
+const ST_PLAY := 2
+
+# special kinds
+const SP_NONE := 0
+const SP_STRIPE_H := 1   # clears its row
+const SP_STRIPE_V := 2   # clears its column
+const SP_WRAPPED := 3    # 3x3 blast
+const SP_BOMB := 4       # clears every piece of one species
+
+var grid: Array = []       # grid[r][c] = species index, -1 = empty
+var special: Array = []    # special[r][c] = SP_*
+var pieces: Array = []     # pieces[r][c] = AnimatedSprite2D or null
+var frames: Array = []     # frames[species] -> plain SpriteFrames
+var frames_sp: Array = []  # frames_sp[species][kind-1] -> special SpriteFrames
+var frames_bomb: SpriteFrames
+var selected := Vector2i(-1, -1)
+var last_swap: Array = []
+var busy := false
+var score := 0
+var score_label: Label
+var combo_label: Label
+var notice_label: Label
+var sfx: Dictionary = {}
+var music: AudioStreamPlayer
+var muted := false
+var music_started := false
+var moves_left := 0
+var target := 0
+var game_over := false
+var species_count := SPECIES
+var level := 0
+var stars := 0
+var best: Dictionary = {}
+var level_label: Label
+var star_nodes: Array = []
+var star_full: AtlasTexture
+var star_empty: AtlasTexture
+var bg_layer: Node2D
+var bg_front: Sprite2D
+var bg_back: Sprite2D
+var ui_font: Font
+var menu_marks: Array = []
+var bg_menu_tex: Texture2D
+var bg_play_tex: Texture2D
+var board_layer: Node2D
+var jelly_layer: Node2D
+var hud_layer: Node2D
+var menu_layer: Node2D
+var select_layer: Node2D
+var state := ST_MENU
+var select_buttons: Array = []
+var select_stars: Array = []
+var jelly: Array = []          # jelly[r][c] layers left on that cell, 0 = none
+var jelly_left := 0
+var collected := 0             # pieces of the goal species cleared this level
+var goal: Dictionary = {}
+var star_base := 0
+var no_finish := false   # dev: balance harness plays every move
+var fast := false          # dev: skip animation waits (balance harness)
+var won := false
+var moves_label: Label
+var target_label: Label
+var bar_bg: ColorRect
+var bar_fill: ColorRect
+var overlay: ColorRect
+var result_label: Label
+var result_sub: Label
+var voices: Array = []
+var voice_player: AudioStreamPlayer
+var idle_tex: Texture2D
+var pop_tex: Texture2D
+var sp_tex: Texture2D
+var bomb_tex: Texture2D
+
+
+func _ready() -> void:
+	randomize()
+	idle_tex = load("res://assets/critters_idle_sheet.png")
+	pop_tex = load("res://assets/critters_pop_sheet.png")
+	sp_tex = load("res://assets/critters_special_sheet.png")
+	bomb_tex = load("res://assets/bomb_sheet.png")
+	for s in SPECIES:
+		frames.append(_build_frames(s))
+		frames_sp.append([
+			_build_special_frames(s, SP_STRIPE_H),
+			_build_special_frames(s, SP_STRIPE_V),
+			_build_special_frames(s, SP_WRAPPED),
+		])
+	frames_bomb = _build_bomb_frames()
+	_build_ui()
+	_build_audio()
+	_load_progress()
+	_build_menu()
+	_build_select()
+	_goto(ST_MENU)
+	queue_redraw()
+	var args := OS.get_cmdline_user_args()
+	if args.has("shot"):
+		_auto_shot()
+	elif args.has("selftest"):
+		_selftest()
+	elif args.has("shotpop"):
+		_shot_pop()
+	elif args.has("shotspecial"):
+		_shot_special()
+	elif args.has("shotshuffle"):
+		_shot_shuffle()
+	elif args.has("shotcombo"):
+		_shot_combo()
+	elif args.has("balance"):
+		_balance()
+	elif args.has("shotwin"):
+		_shot_win()
+	elif args.has("shotmenu"):
+		_shot_menu()
+	elif args.has("shotselect"):
+		_shot_select()
+	elif args.has("shotjelly"):
+		_shot_jelly()
+
+
+func _atlas(tex: Texture2D, col: int, row: int) -> AtlasTexture:
+	var at := AtlasTexture.new()
+	at.atlas = tex
+	at.region = Rect2(col * 32, row * 32, 32, 32)
+	return at
+
+
+func _add_pop(sf: SpriteFrames, s: int) -> void:
+	sf.add_animation("pop")
+	sf.set_animation_loop("pop", false)
+	sf.set_animation_speed("pop", 1.0)
+	for i in POP_DUR.size():
+		sf.add_frame("pop", _atlas(pop_tex, i, s), POP_DUR[i])
+
+
+func _build_frames(s: int) -> SpriteFrames:
+	var sf := SpriteFrames.new()
+	sf.remove_animation("default")
+	sf.add_animation("idle")
+	sf.set_animation_loop("idle", true)
+	sf.set_animation_speed("idle", 1.0)
+	for i in IDLE_DUR.size():
+		sf.add_frame("idle", _atlas(idle_tex, i, s), IDLE_DUR[i])
+	_add_pop(sf, s)
+	return sf
+
+
+func _build_special_frames(s: int, kind: int) -> SpriteFrames:
+	var sf := SpriteFrames.new()
+	sf.remove_animation("default")
+	sf.add_animation("idle")
+	sf.set_animation_loop("idle", true)
+	sf.set_animation_speed("idle", 1.0)
+	var base: int = (kind - 1) * 4
+	for i in IDLE_DUR.size():
+		sf.add_frame("idle", _atlas(sp_tex, base + i, s), IDLE_DUR[i])
+	_add_pop(sf, s)
+	return sf
+
+
+func _build_bomb_frames() -> SpriteFrames:
+	var sf := SpriteFrames.new()
+	sf.remove_animation("default")
+	sf.add_animation("idle")
+	sf.set_animation_loop("idle", true)
+	sf.set_animation_speed("idle", 1.0)
+	for i in IDLE_DUR.size():
+		sf.add_frame("idle", _atlas(bomb_tex, i, 0), IDLE_DUR[i])
+	_add_pop(sf, 0)
+	return sf
+
+
+func _frames_for(s: int, kind: int) -> SpriteFrames:
+	if kind == SP_BOMB:
+		return frames_bomb
+	if kind == SP_NONE:
+		return frames[s]
+	return frames_sp[s][kind - 1]
+
+
+# --- ui -------------------------------------------------------------------
+
+func _font(c: Control, size: int, col: Color, shadow: bool = true) -> void:
+	if ui_font != null:
+		c.add_theme_font_override("font", ui_font)
+	c.add_theme_font_size_override("font_size", size)
+	c.add_theme_color_override("font_color", col)
+	if shadow:
+		c.add_theme_color_override("font_shadow_color", Color(0.02, 0.06, 0.13, 0.85))
+		c.add_theme_constant_override("shadow_offset_x", 2)
+		c.add_theme_constant_override("shadow_offset_y", 2)
+		c.add_theme_color_override("font_outline_color", Color(0.03, 0.08, 0.16, 0.95))
+		c.add_theme_constant_override("outline_size", 4)
+
+
+func _build_ui() -> void:
+	ui_font = load("res://assets/pixelfont.fnt")
+	assert(ui_font != null, "assets/pixelfont.fnt missing or not imported")
+	bg_layer = Node2D.new()
+	add_child(bg_layer)
+	bg_menu_tex = load("res://assets/bg_menu.png")
+	bg_play_tex = load("res://assets/bg_play.png")
+	assert(bg_menu_tex != null and bg_play_tex != null,
+			"assets/bg_menu.png or bg_play.png missing or not imported")
+	bg_back = Sprite2D.new()
+	bg_back.texture = bg_menu_tex
+	bg_back.centered = false
+	bg_back.scale = Vector2(2, 2)
+	bg_back.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	bg_back.z_index = -20
+	bg_layer.add_child(bg_back)
+	# the same image again over the header strip, so pieces falling in from
+	# above the board are hidden behind a seamless slice of the sky
+	var top := AtlasTexture.new()
+	top.atlas = bg_play_tex
+	top.region = Rect2(0, 0, 320, ORIGIN.y / 2)
+	bg_front = Sprite2D.new()
+	bg_front.texture = top
+	bg_front.centered = false
+	bg_front.scale = Vector2(2, 2)
+	bg_front.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	bg_front.z_index = 4
+	bg_layer.add_child(bg_front)
+
+	board_layer = Node2D.new()
+	add_child(board_layer)
+	# above the pieces, so jelly is actually visible; Polygon2D rather than a
+	# ColorRect because a Control here would swallow clicks meant for the board
+	jelly_layer = Node2D.new()
+	add_child(jelly_layer)
+	hud_layer = Node2D.new()
+	add_child(hud_layer)
+	menu_layer = Node2D.new()
+	add_child(menu_layer)
+	select_layer = Node2D.new()
+	add_child(select_layer)
+
+	var title := Label.new()
+	title.text = "SEAL CRUSH"
+	title.position = Vector2(64, 44)
+	_font(title, 28, Color("bdeeff"))
+	title.z_index = 6
+	hud_layer.add_child(title)
+
+	score_label = Label.new()
+	score_label.position = Vector2(64, 80)
+	_font(score_label, 21, Color("ffd977"))
+	score_label.z_index = 6
+	hud_layer.add_child(score_label)
+
+	# Soft vignettes instead of a scrim rectangle: a flat panel left a hard
+	# seam straight across the scene at the board's top edge. These ramp to
+	# zero alpha exactly where the board begins, so there is no edge at all.
+	for spec in [["res://assets/ui_fade_top.png", 0.0, 80.0],
+			["res://assets/ui_fade_bot.png", 672.0, 44.0]]:
+		var fade := Sprite2D.new()
+		fade.texture = load(spec[0])
+		assert(fade.texture != null, "%s missing or not imported" % spec[0])
+		fade.centered = false
+		fade.position = Vector2(0, spec[1])
+		fade.scale = Vector2(160, 2)
+		fade.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		fade.z_index = 5
+		hud_layer.add_child(fade)
+
+	level_label = Label.new()
+	level_label.position = Vector2(458, 42)
+	_font(level_label, 14, Color(0.80, 0.90, 1.0, 0.85))
+	level_label.z_index = 6
+	hud_layer.add_child(level_label)
+
+	moves_label = Label.new()
+	moves_label.position = Vector2(458, 80)
+	_font(moves_label, 21, Color("9fe3ff"))
+	moves_label.z_index = 6
+	hud_layer.add_child(moves_label)
+
+	target_label = Label.new()
+	target_label.position = Vector2(64, 110)
+	_font(target_label, 14, Color(0.88, 0.95, 1.0, 0.92))
+	target_label.z_index = 6
+	hud_layer.add_child(target_label)
+
+	bar_bg = ColorRect.new()
+	bar_bg.position = Vector2(64, 136)
+	bar_bg.size = Vector2(512, 6)
+	bar_bg.color = Color(1, 1, 1, 0.12)
+	bar_bg.z_index = 6
+	hud_layer.add_child(bar_bg)
+
+	bar_fill = ColorRect.new()
+	bar_fill.position = Vector2(64, 136)
+	bar_fill.size = Vector2(0, 6)
+	bar_fill.color = Color("ffd977")
+	bar_fill.z_index = 7
+	hud_layer.add_child(bar_fill)
+
+	combo_label = Label.new()
+	combo_label.position = Vector2(250, 108)
+	_font(combo_label, 14, Color("ff95bb"))
+	combo_label.modulate.a = 0.0
+	combo_label.z_index = 6
+	hud_layer.add_child(combo_label)
+
+	notice_label = Label.new()
+	notice_label.position = Vector2(0, 392)
+	notice_label.size = Vector2(640, 40)
+	notice_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_font(notice_label, 21, Color("ffd977"))
+	notice_label.modulate.a = 0.0
+	notice_label.z_index = 7
+	hud_layer.add_child(notice_label)
+
+	_build_legend()
+
+	overlay = ColorRect.new()
+	overlay.size = Vector2(640, 760)
+	overlay.color = Color(0.03, 0.09, 0.16, 0.80)
+	overlay.z_index = 10
+	overlay.visible = false
+	hud_layer.add_child(overlay)
+
+	var star_sheet: Texture2D = load("res://assets/stars.png")
+	assert(star_sheet != null, "assets/stars.png is missing or not imported")
+	star_full = AtlasTexture.new()
+	star_full.atlas = star_sheet
+	star_full.region = Rect2(0, 0, 16, 16)
+	star_empty = AtlasTexture.new()
+	star_empty.atlas = star_sheet
+	star_empty.region = Rect2(16, 0, 16, 16)
+	for i in 3:
+		var tr := TextureRect.new()
+		tr.position = Vector2(264 + i * 40, 278)
+		tr.scale = Vector2(2, 2)
+		tr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		tr.z_index = 11
+		tr.visible = false
+		hud_layer.add_child(tr)
+		star_nodes.append(tr)
+
+	result_label = Label.new()
+	result_label.position = Vector2(0, 330)
+	result_label.size = Vector2(640, 50)
+	result_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	result_label.add_theme_font_size_override("font_size", 35)
+	result_label.z_index = 11
+	result_label.visible = false
+	hud_layer.add_child(result_label)
+
+	result_sub = Label.new()
+	result_sub.position = Vector2(0, 390)
+	result_sub.size = Vector2(640, 30)
+	result_sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_font(result_sub, 14, Color(0.9, 0.95, 1.0, 0.9))
+	result_sub.z_index = 11
+	result_sub.visible = false
+	hud_layer.add_child(result_sub)
+
+	_update_score()
+
+
+func _button(text: String, pos: Vector2, size: Vector2, font_size: int = 22) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.position = pos
+	b.size = size
+	b.flat = true
+	for key in ["normal", "hover", "pressed", "disabled", "focus"]:
+		b.add_theme_stylebox_override(key, StyleBoxEmpty.new())
+	_font(b, font_size, Color("dff1ff"))
+	b.add_theme_color_override("font_hover_color", Color("fff1c9"))
+	b.add_theme_color_override("font_pressed_color", Color("9fe3ff"))
+	b.add_theme_color_override("font_disabled_color", Color(0.62, 0.72, 0.84, 0.45))
+	return b
+
+
+func _screen_label(text: String, y: float, font_size: int, col: Color,
+		outline: bool = false) -> Control:
+	# Godot ignores outline_size for bitmap fonts - it builds outlines from
+	# vector glyph data - so thin pixel strokes get an outline the manual way,
+	# from eight offset copies behind the real label.
+	var root := Control.new()
+	root.position = Vector2(0, y)
+	root.size = Vector2(640, font_size + 14)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if outline:
+		for o in [Vector2(-2, 0), Vector2(2, 0), Vector2(0, -2), Vector2(0, 2),
+				Vector2(-2, -2), Vector2(2, -2), Vector2(-2, 2), Vector2(2, 2)]:
+			var sh := Label.new()
+			sh.text = text
+			sh.position = o
+			sh.size = root.size
+			sh.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			sh.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			_font(sh, font_size, Color(0.02, 0.06, 0.14, 0.95), false)
+			root.add_child(sh)
+	var l := Label.new()
+	l.text = text
+	l.size = root.size
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_font(l, font_size, col, false)
+	root.add_child(l)
+	return root
+
+
+func _star_rect(pos: Vector2) -> TextureRect:
+	var tr := TextureRect.new()
+	tr.position = pos
+	tr.scale = Vector2(1.6, 1.6)
+	tr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	tr.texture = star_empty
+	return tr
+
+
+func _hover_marks(b: Button, font_size: int) -> void:
+	var w: float = 60.0
+	if ui_font != null:
+		w = ui_font.get_string_size(b.text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
+	var cy: float = b.position.y + b.size.y * 0.5
+	var pair: Array = []
+	for side in [-1.0, 1.0]:
+		var pg := Polygon2D.new()
+		pg.polygon = PackedVector2Array([Vector2(0, -5), Vector2(5, 0),
+				Vector2(0, 5), Vector2(-5, 0)])
+		pg.position = Vector2(320.0 + side * (w * 0.5 + 22.0), cy)
+		pg.color = Color("9fe3ff")
+		pg.visible = false
+		menu_layer.add_child(pg)
+		pair.append(pg)
+	b.mouse_entered.connect(func():
+		for pg in pair:
+			pg.visible = true)
+	b.mouse_exited.connect(func():
+		for pg in pair:
+			pg.visible = false)
+	menu_marks.append(pair)
+
+
+func _build_menu() -> void:
+	menu_layer.add_child(_screen_label("SEAL CRUSH", 112, 42, Color("bdeeff"), true))
+	menu_layer.add_child(_screen_label("A TINY MATCH-3", 172, 14, Color(0.80, 0.90, 1.0, 0.85), true))
+
+	# the cast, idling
+	for i in SPECIES:
+		# contact shadow first - without one they read as stickers pasted on
+		var shade := Polygon2D.new()
+		var ring := PackedVector2Array()
+		for k in 14:
+			var a := TAU * k / 14.0
+			ring.append(Vector2(cos(a) * 27.0, sin(a) * 6.5))
+		shade.polygon = ring
+		shade.position = Vector2(80 + i * 96, 297)
+		shade.color = Color(0.06, 0.15, 0.24, 0.30)
+		menu_layer.add_child(shade)
+
+		var sp := AnimatedSprite2D.new()
+		sp.sprite_frames = frames[i]
+		sp.scale = Vector2(2, 2)
+		sp.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		sp.position = Vector2(80 + i * 96, 262)
+		sp.modulate = Color(0.95, 0.98, 1.0)      # settle them into the night
+		menu_layer.add_child(sp)
+		sp.play("idle")
+		sp.frame = i % IDLE_DUR.size()
+
+	var play := _button("PLAY", Vector2(210, 348), Vector2(220, 54), 35)
+	play.pressed.connect(func(): _start_level(_next_unplayed()))
+	menu_layer.add_child(play)
+	_hover_marks(play, 35)
+
+	var levels := _button("LEVELS", Vector2(210, 414), Vector2(220, 54), 35)
+	levels.pressed.connect(func(): _goto(ST_SELECT))
+	menu_layer.add_child(levels)
+	_hover_marks(levels, 35)
+
+	if not OS.has_feature("web"):
+		var quit := _button("QUIT", Vector2(210, 480), Vector2(220, 54), 35)
+		quit.pressed.connect(func(): get_tree().quit())
+		menu_layer.add_child(quit)
+		_hover_marks(quit, 35)
+
+	menu_layer.add_child(_screen_label(
+			"M MUTE" if OS.has_feature("web") else "M MUTE    ESC QUIT", 700, 14,
+			Color(0.13, 0.21, 0.33, 0.95), false))
+
+
+func _build_select() -> void:
+	select_layer.add_child(_screen_label("SELECT LEVEL", 78, 28, Color("bdeeff"), true))
+	for i in LEVELS.size():
+		var y := 170.0 + i * 76.0
+
+		# a card behind each row: the scene is busy and pale in places, and the
+		# row text was unreadable where it crossed the ice shelf and snow bank
+		var card := ColorRect.new()
+		card.position = Vector2(84, y - 5)
+		card.size = Vector2(486, 62)
+		card.color = Color(0.04, 0.10, 0.19, 0.66)
+		card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		select_layer.add_child(card)
+
+		var b := _button("LEVEL %d" % (i + 1), Vector2(92, y), Vector2(148, 52), 21)
+		b.pressed.connect(_start_level.bind(i))
+		select_layer.add_child(b)
+		select_buttons.append(b)
+
+		var info := Label.new()
+		info.text = "%d moves    %s" % [LEVELS[i]["moves"], _level_summary(i)]
+		info.position = Vector2(248, y + 18)
+		_font(info, 14, Color(0.88, 0.95, 1.0, 0.85))
+		select_layer.add_child(info)
+
+		var row: Array = []
+		for j in 3:
+			var tr := _star_rect(Vector2(474 + j * 30, y + 14))
+			select_layer.add_child(tr)
+			row.append(tr)
+		select_stars.append(row)
+
+	var back_card := ColorRect.new()
+	back_card.position = Vector2(246, 606)
+	back_card.size = Vector2(148, 54)
+	back_card.color = Color(0.04, 0.10, 0.19, 0.66)
+	back_card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	select_layer.add_child(back_card)
+
+	var back := _button("BACK", Vector2(250, 610), Vector2(140, 46), 21)
+	back.pressed.connect(func(): _goto(ST_MENU))
+	select_layer.add_child(back)
+	select_layer.add_child(_screen_label("CLEAR A LEVEL TO UNLOCK THE NEXT", 684, 14,
+			Color(0.13, 0.21, 0.33, 0.95), false))
+
+
+func _refresh_select() -> void:
+	for i in LEVELS.size():
+		var unlocked: bool = i == 0 or int(best.get(i - 1, 0)) > 0
+		select_buttons[i].disabled = not unlocked
+		select_buttons[i].text = "LEVEL %d" % (i + 1) if unlocked else "LOCKED"
+		var earned: int = int(best.get(i, 0))
+		for j in 3:
+			select_stars[i][j].texture = star_full if j < earned else star_empty
+			select_stars[i][j].modulate.a = 1.0 if unlocked else 0.3
+
+
+func _level_summary(i: int) -> String:
+	var g: Dictionary = LEVELS[i]["goal"]
+	match int(g["kind"]):
+		GOAL_COLLECT:
+			return "%dx %s" % [int(g["count"]), SPECIES_SHORT[int(g["species"])]]
+		GOAL_JELLY:
+			var n := 0
+			for line in g["layout"]:
+				for ch in line:
+					if ch == "1" or ch == "2":
+						n += int(ch)
+			return "%d ICE" % n
+		_:
+			return "%d PTS" % int(g["score"])
+
+
+func _next_unplayed() -> int:
+	for i in LEVELS.size():
+		if int(best.get(i, 0)) == 0:
+			return i
+	return 0
+
+
+func _goto(s: int) -> void:
+	state = s
+	menu_layer.visible = s == ST_MENU
+	select_layer.visible = s == ST_SELECT
+	board_layer.visible = s == ST_PLAY
+	jelly_layer.visible = s == ST_PLAY
+	bg_front.visible = s == ST_PLAY
+	bg_back.texture = bg_play_tex if s == ST_PLAY else bg_menu_tex
+	hud_layer.visible = s == ST_PLAY
+	if s != ST_PLAY:
+		_hide_result()
+	if s == ST_SELECT:
+		_refresh_select()
+	queue_redraw()
+
+
+func _start_level(i: int) -> void:
+	if busy:
+		return
+	busy = true
+	_goto(ST_PLAY)
+	_load_level(i)
+	await _settle()
+	busy = false
+
+
+func _build_legend() -> void:
+	# Icon + label pairs on chips rather than one run-on line: grouped by
+	# meaning, and the chips match the level-select cards. Icons stay at 1x -
+	# any fractional scale breaks the pixel grid.
+	var entries := [
+		["MATCH 4", sp_tex, 0],     # striped
+		["L OR T", sp_tex, 8],      # wrapped
+		["MATCH 5", bomb_tex, 0],   # colour bomb
+	]
+	var icon := 32.0
+	var inner := 6.0        # label to icon
+	var chip_pad := 10.0
+	var gap := 14.0
+	var widths: Array = []
+	var total := -gap
+	for e in entries:
+		var w: float = 60.0
+		if ui_font != null:
+			w = ui_font.get_string_size(e[0], HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
+		widths.append(w)
+		total += w + inner + icon + chip_pad * 2.0 + gap
+	var x: float = (640.0 - total) * 0.5
+	for i in entries.size():
+		var cw: float = widths[i] + inner + icon + chip_pad * 2.0
+		var chip := ColorRect.new()
+		chip.position = Vector2(x, 678)
+		chip.size = Vector2(cw, 38)
+		chip.color = Color(0.04, 0.10, 0.19, 0.58)
+		chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		chip.z_index = 6
+		hud_layer.add_child(chip)
+
+		var lab := Label.new()
+		lab.text = entries[i][0]
+		lab.position = Vector2(x + chip_pad, 688)
+		_font(lab, 14, Color(0.90, 0.95, 1.0, 0.96))
+		lab.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		lab.z_index = 7
+		hud_layer.add_child(lab)
+
+		var at := AtlasTexture.new()
+		at.atlas = entries[i][1]
+		at.region = Rect2(entries[i][2] * 32, 0, 32, 32)
+		var ic := TextureRect.new()
+		ic.texture = at
+		ic.position = Vector2(x + chip_pad + widths[i] + inner, 681)
+		ic.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		ic.z_index = 7
+		hud_layer.add_child(ic)
+		x += cw + gap
+
+	var keys := Label.new()
+	keys.text = "R RETRY        ESC LEVELS        M MUTE"
+	keys.position = Vector2(0, 728)
+	keys.size = Vector2(640, 20)
+	keys.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_font(keys, 14, Color(0.72, 0.84, 0.96, 0.88))
+	keys.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	keys.z_index = 6
+	hud_layer.add_child(keys)
+
+
+func _draw() -> void:
+	if state != ST_PLAY:
+		return
+	for r in ROWS:
+		for c in COLS:
+			var p: Vector2 = ORIGIN + Vector2(c * CELL, r * CELL)
+			var tint := Color(1, 1, 1, 0.025) if (r + c) % 2 == 0 else Color(1, 1, 1, 0.055)
+			draw_rect(Rect2(p, Vector2(CELL, CELL)), tint, true)
+			if jelly.size() == ROWS and jelly[r][c] > 0:
+				var a: float = 0.12 if jelly[r][c] == 1 else 0.22
+				draw_rect(Rect2(p + Vector2(2, 2), Vector2(CELL - 4, CELL - 4)),
+					Color(1.0, 0.58, 0.72, a), true)
+				draw_rect(Rect2(p + Vector2(2, 2), Vector2(CELL - 4, CELL - 4)),
+					Color(1.0, 0.70, 0.82, 0.35), false, 1.0)
+
+
+func _update_score() -> void:
+	score_label.text = "score  %d" % score
+	moves_label.text = "moves  %d" % max(moves_left, 0)
+	target_label.text = _goal_text()
+	level_label.text = "LEVEL %d/%d" % [level + 1, LEVELS.size()]
+	var frac: float = clampf(float(_goal_done()) / float(maxi(_goal_total(), 1)), 0.0, 1.0)
+	bar_fill.size = Vector2(512.0 * frac, 6)
+
+
+func _show_combo(combo: int, gained: int) -> void:
+	if combo > 1:
+		combo_label.text = "COMBO x%d   +%d" % [combo, gained]
+	else:
+		combo_label.text = "+%d" % gained
+	combo_label.modulate.a = 1.0
+
+
+func _show_notice(text: String) -> void:
+	notice_label.text = text
+	notice_label.modulate.a = 1.0
+
+
+func _hide_notice() -> void:
+	create_tween().tween_property(notice_label, "modulate:a", 0.0, 0.4)
+
+
+func _fade_combo() -> void:
+	var t := create_tween()
+	t.tween_interval(0.4)
+	t.tween_property(combo_label, "modulate:a", 0.0, 0.5)
+
+
+# --- audio ----------------------------------------------------------------
+
+# one per species, in SPECIES order: seal, penguin, otter, walrus, narwhal, bear
+const VOICE_FILES := ["voice_seal.wav", "voice_penguin.wav", "voice_otter.wav",
+		"voice_walrus.wav", "voice_narwhal.wav", "voice_bear.wav"]
+
+# The wavs are RMS-normalised to equal loudness, so these are a real mix:
+# frequent sounds sit well back, rewards come forward.
+const SFX := {
+	"move":    ["move.wav",    -22.0],
+	"pop":     ["pop.wav",     -15.0],
+	"invalid": ["invalid.wav", -20.0],
+	"special": ["special.wav", -16.0],
+	"combo":   ["combo.wav",   -13.0],
+	"shuffle": ["shuffle.wav", -18.0],
+}
+
+
+func _build_audio() -> void:
+	for key in SFX:
+		var p := AudioStreamPlayer.new()
+		p.stream = load("res://assets/audio/" + SFX[key][0])
+		p.volume_db = SFX[key][1]
+		add_child(p)
+		sfx[key] = p
+	voice_player = AudioStreamPlayer.new()
+	voice_player.volume_db = -15.0
+	add_child(voice_player)
+	for name in VOICE_FILES:
+		voices.append(load("res://assets/audio/" + name))
+
+	music = AudioStreamPlayer.new()
+	music.stream = load("res://assets/audio/music.wav")
+	music.volume_db = -24.0
+	# Godot 4.7's wav importer does not carry edit/loop_mode onto the resource
+	# when compress/mode is QOA, so set the loop on the stream directly.
+	if music.stream is AudioStreamWAV:
+		var w: AudioStreamWAV = music.stream
+		w.loop_mode = AudioStreamWAV.LOOP_FORWARD
+		w.loop_begin = 0
+		w.loop_end = int(w.get_length() * w.mix_rate)
+	add_child(music)
+	music.finished.connect(_restart_music)   # safety net if the loop is lost
+	if OS.has_feature("web"):
+		return          # wait for a user gesture, see _input()
+	music.play()
+	music_started = true
+
+
+func _input(event: InputEvent) -> void:
+	# First gesture unlocks the browser's audio context. Buttons consume their
+	# own clicks, so this has to be _input, not _unhandled_input.
+	if music_started or music == null:
+		return
+	if event is InputEventMouseButton or event is InputEventKey \
+			or event is InputEventScreenTouch:
+		music_started = true
+		if not muted:
+			music.play()
+
+
+func _restart_music() -> void:
+	if not muted:
+		music.play()
+
+
+func _play(key: String, pitch: float = 1.0) -> void:
+	var p: AudioStreamPlayer = sfx.get(key)
+	if p == null:
+		return
+	p.pitch_scale = pitch
+	p.play()
+
+
+func _play_voice(s: int) -> void:
+	if s < 0 or s >= voices.size() or voice_player == null:
+		return
+	voice_player.stream = voices[s]
+	voice_player.play()
+
+
+func _toggle_mute() -> void:
+	muted = not muted
+	AudioServer.set_bus_mute(AudioServer.get_bus_index("Master"), muted)
+	_show_notice("sound off" if muted else "sound on")
+	_hide_notice()
+
+
+# --- board ----------------------------------------------------------------
+
+func _cell_pos(r: int, c: int) -> Vector2:
+	return ORIGIN + Vector2(c * CELL + CELL * 0.5, r * CELL + CELL * 0.5)
+
+
+func _cell_at(pos: Vector2) -> Vector2i:
+	var local := pos - ORIGIN
+	var c := int(floor(local.x / CELL))
+	var r := int(floor(local.y / CELL))
+	if c < 0 or c >= COLS or r < 0 or r >= ROWS:
+		return Vector2i(-1, -1)
+	return Vector2i(c, r)
+
+
+func _in_bounds(p: Vector2i) -> bool:
+	return p.x >= 0 and p.x < COLS and p.y >= 0 and p.y < ROWS
+
+
+func _spawn(r: int, c: int, s: int) -> AnimatedSprite2D:
+	var sp := AnimatedSprite2D.new()
+	sp.sprite_frames = frames[s]
+	sp.scale = Vector2(2, 2)
+	sp.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	sp.position = _cell_pos(r, c)
+	board_layer.add_child(sp)
+	sp.play("idle")
+	sp.frame = randi() % IDLE_DUR.size()
+	return sp
+
+
+func _fill_board() -> void:
+	for row in pieces:
+		for sp in row:
+			if sp != null:
+				sp.queue_free()
+	grid.clear()
+	special.clear()
+	pieces.clear()
+	for r in ROWS:
+		grid.append([])
+		special.append([])
+		pieces.append([])
+		for c in COLS:
+			grid[r].append(-1)
+			special[r].append(SP_NONE)
+			pieces[r].append(null)
+	for r in ROWS:
+		for c in COLS:
+			var choices: Array = []
+			for s in species_count:
+				if not _would_match(r, c, s):
+					choices.append(s)
+			if choices.is_empty():
+				choices = range(species_count)
+			var s: int = choices[randi() % choices.size()]
+			grid[r][c] = s
+			pieces[r][c] = _spawn(r, c, s)
+
+
+func _would_match(r: int, c: int, s: int) -> bool:
+	if c >= 2 and grid[r][c - 1] == s and grid[r][c - 2] == s:
+		return true
+	if r >= 2 and grid[r - 1][c] == s and grid[r - 2][c] == s:
+		return true
+	return false
+
+
+# --- match analysis -------------------------------------------------------
+
+func _runs() -> Array:
+	var out: Array = []
+	if grid.size() < ROWS:
+		return out           # no board yet (menu screen)
+	for r in ROWS:
+		var c := 0
+		while c < COLS:
+			var s: int = grid[r][c]
+			var e := c
+			while e + 1 < COLS and s >= 0 and grid[r][e + 1] == s:
+				e += 1
+			if s >= 0 and e - c + 1 >= 3:
+				var cells: Array = []
+				for k in range(c, e + 1):
+					cells.append(Vector2i(k, r))
+				out.append({"cells": cells, "horizontal": true, "species": s})
+			c = e + 1
+	for c in COLS:
+		var r := 0
+		while r < ROWS:
+			var s: int = grid[r][c]
+			var e := r
+			while e + 1 < ROWS and s >= 0 and grid[e + 1][c] == s:
+				e += 1
+			if s >= 0 and e - r + 1 >= 3:
+				var cells: Array = []
+				for k in range(r, e + 1):
+					cells.append(Vector2i(c, k))
+				out.append({"cells": cells, "horizontal": false, "species": s})
+			r = e + 1
+	return out
+
+
+func _groups() -> Array:
+	var runs := _runs()
+	var used: Array = []
+	used.resize(runs.size())
+	used.fill(false)
+	var groups: Array = []
+	for i in runs.size():
+		if used[i]:
+			continue
+		used[i] = true
+		var g := {"runs": [runs[i]], "cells": {}}
+		for cell in runs[i]["cells"]:
+			g["cells"][cell] = true
+		var grew := true
+		while grew:
+			grew = false
+			for j in runs.size():
+				if used[j]:
+					continue
+				for cell in runs[j]["cells"]:
+					if g["cells"].has(cell):
+						used[j] = true
+						g["runs"].append(runs[j])
+						for c2 in runs[j]["cells"]:
+							g["cells"][c2] = true
+						grew = true
+						break
+		groups.append(g)
+	return groups
+
+
+func _classify(g: Dictionary) -> int:
+	var has_h := false
+	var has_v := false
+	var longest := 0
+	for run in g["runs"]:
+		var n: int = run["cells"].size()
+		if n > longest:
+			longest = n
+		if run["horizontal"]:
+			has_h = true
+		else:
+			has_v = true
+	if has_h and has_v:
+		return SP_WRAPPED
+	if longest >= 5:
+		return SP_BOMB
+	if longest == 4:
+		return SP_STRIPE_H if g["runs"][0]["horizontal"] else SP_STRIPE_V
+	return SP_NONE
+
+
+func _creation_cell(g: Dictionary, kind: int) -> Vector2i:
+	for cell in last_swap:
+		if g["cells"].has(cell):
+			return cell
+	if kind == SP_WRAPPED:
+		for a in g["runs"]:
+			for b in g["runs"]:
+				if a["horizontal"] == b["horizontal"]:
+					continue
+				for cell in a["cells"]:
+					if b["cells"].has(cell):
+						return cell
+	var best: Array = g["runs"][0]["cells"]
+	for run in g["runs"]:
+		if run["cells"].size() > best.size():
+			best = run["cells"]
+	return best[best.size() / 2]
+
+
+func _find_matches() -> Array:
+	var out := {}
+	for g in _groups():
+		for cell in g["cells"]:
+			out[cell] = true
+	return out.keys()
+
+
+# --- specials -------------------------------------------------------------
+
+func _blast(cell: Vector2i, kind: int, bomb_species: int) -> Array:
+	var out: Array = []
+	if kind == SP_STRIPE_H:
+		for c in COLS:
+			out.append(Vector2i(c, cell.y))
+	elif kind == SP_STRIPE_V:
+		for r in ROWS:
+			out.append(Vector2i(cell.x, r))
+	elif kind == SP_WRAPPED:
+		for dr in range(-1, 2):
+			for dc in range(-1, 2):
+				var p := cell + Vector2i(dc, dr)
+				if _in_bounds(p):
+					out.append(p)
+	elif kind == SP_BOMB:
+		for r in ROWS:
+			for c in COLS:
+				if grid[r][c] == bomb_species:
+					out.append(Vector2i(c, r))
+	return out
+
+
+func _expand(seed: Array, bomb_target: int) -> Array:
+	var out := {}
+	var queue: Array = seed.duplicate()
+	while not queue.is_empty():
+		var cell: Vector2i = queue.pop_back()
+		if out.has(cell) or not _in_bounds(cell):
+			continue
+		if grid[cell.y][cell.x] < 0:
+			continue
+		out[cell] = true
+		var kind: int = special[cell.y][cell.x]
+		if kind != SP_NONE:
+			var target: int = bomb_target if bomb_target >= 0 else grid[cell.y][cell.x]
+			for extra in _blast(cell, kind, target):
+				if not out.has(extra):
+					queue.append(extra)
+	return out.keys()
+
+
+func _make_special(cell: Vector2i, kind: int, species: int) -> void:
+	special[cell.y][cell.x] = kind
+	grid[cell.y][cell.x] = species
+	_play("special")
+	var sp: AnimatedSprite2D = pieces[cell.y][cell.x]
+	if sp == null:
+		sp = _spawn(cell.y, cell.x, species)
+		pieces[cell.y][cell.x] = sp
+	sp.sprite_frames = _frames_for(species, kind)
+	sp.play("idle")
+	if not fast:
+		sp.scale = Vector2(2.9, 2.9)
+		create_tween().tween_property(sp, "scale", Vector2(2, 2), 0.2) \
+			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+# --- input ----------------------------------------------------------------
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed:
+		if event.keycode == KEY_M:
+			_toggle_mute()
+		elif event.keycode == KEY_F12:
+			_save_shot("user://shot.png")
+		elif event.keycode == KEY_ESCAPE:
+			# step back a screen; quit only from the menu
+			if state == ST_PLAY:
+				_goto(ST_SELECT)
+			elif state == ST_SELECT:
+				_goto(ST_MENU)
+			elif not OS.has_feature("web"):
+				get_tree().quit()
+		elif state == ST_PLAY and not busy:
+			if event.keycode == KEY_R:
+				_restart()
+			elif event.keycode in [KEY_SPACE, KEY_ENTER] and game_over and won:
+				_next_level()
+		return
+	if state != ST_PLAY or busy or game_over:
+		return
+	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+		var cell := _cell_at(event.position)
+		if cell.x < 0:
+			return
+		if selected.x < 0:
+			_select(cell)
+			return
+		_highlight(selected, false)
+		var d: int = abs(cell.x - selected.x) + abs(cell.y - selected.y)
+		var from := selected
+		selected = Vector2i(-1, -1)
+		if d == 1:
+			_try_swap(from, cell)
+		elif cell != from:
+			_select(cell)
+
+
+func _select(cell: Vector2i) -> void:
+	selected = cell
+	_highlight(cell, true)
+	_play_voice(grid[cell.y][cell.x])
+
+
+func _highlight(cell: Vector2i, on: bool) -> void:
+	if cell.x < 0:
+		return
+	var sp: AnimatedSprite2D = pieces[cell.y][cell.x]
+	if sp == null:
+		return
+	sp.scale = Vector2(2.3, 2.3) if on else Vector2(2, 2)
+	sp.modulate = Color(1.3, 1.3, 1.3) if on else Color(1, 1, 1)
+
+
+func _swap_data(a: Vector2i, b: Vector2i) -> void:
+	var g: int = grid[a.y][a.x]
+	grid[a.y][a.x] = grid[b.y][b.x]
+	grid[b.y][b.x] = g
+	var k: int = special[a.y][a.x]
+	special[a.y][a.x] = special[b.y][b.x]
+	special[b.y][b.x] = k
+	var p: AnimatedSprite2D = pieces[a.y][a.x]
+	pieces[a.y][a.x] = pieces[b.y][b.x]
+	pieces[b.y][b.x] = p
+
+
+func _animate_swap(a: Vector2i, b: Vector2i) -> void:
+	var sa: AnimatedSprite2D = pieces[a.y][a.x]
+	var sb: AnimatedSprite2D = pieces[b.y][b.x]
+	var pa := sa.position
+	var pb := sb.position
+	if fast:
+		sa.position = pb
+		sb.position = pa
+		return
+	var t := create_tween().set_parallel(true)
+	t.tween_property(sa, "position", pb, 0.14).set_trans(Tween.TRANS_QUAD)
+	t.tween_property(sb, "position", pa, 0.14).set_trans(Tween.TRANS_QUAD)
+	await t.finished
+
+
+func _try_swap(a: Vector2i, b: Vector2i) -> void:
+	busy = true
+	var spent := true
+	_play("move")
+	await _animate_swap(a, b)
+	_swap_data(a, b)
+	last_swap = [a, b]
+	var ka: int = special[a.y][a.x]
+	var kb: int = special[b.y][b.x]
+	if ka != SP_NONE and kb != SP_NONE:
+		# two specials combine into one bigger effect
+		var cells := _combo_blast(a, b, ka, kb)
+		special[a.y][a.x] = SP_NONE
+		special[b.y][b.x] = SP_NONE
+		_show_notice(_combo_name(ka, kb))
+		_play("combo")
+		await _resolve(cells, -1)
+		_hide_notice()
+	elif ka != SP_NONE or kb != SP_NONE:
+		# swapping a single special sets it off, match or not
+		var seed: Array = []
+		var target := -1
+		if ka != SP_NONE:
+			seed.append(a)
+		if kb != SP_NONE:
+			seed.append(b)
+		if ka == SP_BOMB:
+			target = grid[b.y][b.x]
+		elif kb == SP_BOMB:
+			target = grid[a.y][a.x]
+		await _resolve(seed, target)
+	elif _find_matches().is_empty():
+		spent = false                       # a swap that does nothing is free
+		_play("invalid")
+		_swap_data(a, b)
+		await _animate_swap(a, b)
+	else:
+		await _resolve()
+	last_swap = []
+	if spent:
+		moves_left -= 1
+		_update_score()
+	await _settle()
+	_check_outcome()
+	busy = false
+
+
+# --- resolution -----------------------------------------------------------
+
+func _pop(cells: Array) -> void:
+	if cells.is_empty():
+		return
+	var total := 0.0
+	for d in POP_DUR:
+		total += d
+	var ate_jelly := false
+	for cell in cells:
+		var sp: AnimatedSprite2D = pieces[cell.y][cell.x]
+		if sp != null:
+			sp.scale = Vector2(2, 2)
+			sp.modulate = Color(1, 1, 1)
+			sp.z_index = 1
+			sp.play("pop")
+		if jelly.size() == ROWS and jelly[cell.y][cell.x] > 0:
+			jelly[cell.y][cell.x] -= 1
+			jelly_left -= 1
+			ate_jelly = true
+		grid[cell.y][cell.x] = -1
+		special[cell.y][cell.x] = SP_NONE
+	if ate_jelly:
+		_refresh_jelly_view()
+		queue_redraw()
+	if not fast:
+		await get_tree().create_timer(total).timeout
+	for cell in cells:
+		var sp: AnimatedSprite2D = pieces[cell.y][cell.x]
+		if sp != null:
+			sp.queue_free()
+		pieces[cell.y][cell.x] = null
+
+
+func _collapse() -> void:
+	var t: Tween = null
+	if not fast:
+		t = create_tween().set_parallel(true)
+	var moved := false
+	for c in COLS:
+		var write := ROWS - 1
+		for r in range(ROWS - 1, -1, -1):
+			if grid[r][c] >= 0:
+				if r != write:
+					grid[write][c] = grid[r][c]
+					special[write][c] = special[r][c]
+					pieces[write][c] = pieces[r][c]
+					grid[r][c] = -1
+					special[r][c] = SP_NONE
+					pieces[r][c] = null
+					if fast:
+						pieces[write][c].position = _cell_pos(write, c)
+					else:
+						t.tween_property(pieces[write][c], "position",
+							_cell_pos(write, c), 0.18) \
+							.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+					moved = true
+				write -= 1
+		var empties := write + 1
+		for r in range(write, -1, -1):
+			var s := randi() % species_count
+			grid[r][c] = s
+			special[r][c] = SP_NONE
+			var sp := _spawn(r, c, s)
+			pieces[r][c] = sp
+			if not fast:
+				sp.position = _cell_pos(r, c) - Vector2(0, empties * CELL)
+				t.tween_property(sp, "position", _cell_pos(r, c), 0.22) \
+					.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+			moved = true
+	if fast:
+		return
+	if moved:
+		await t.finished
+	else:
+		t.kill()
+
+
+func _resolve(seed: Array = [], bomb_target: int = -1) -> void:
+	var combo := 0
+	var pending: Array = seed.duplicate()
+	var guard := 0
+	while guard < 64:
+		guard += 1
+		var creations: Array = []
+		var clear := {}
+		for g in _groups():
+			var kind: int = _classify(g)
+			var make := Vector2i(-1, -1)
+			if kind != SP_NONE:
+				make = _creation_cell(g, kind)
+				creations.append({"cell": make, "kind": kind, "species": g["runs"][0]["species"]})
+			for cell in g["cells"]:
+				if cell != make:
+					clear[cell] = true
+		for cell in pending:
+			clear[cell] = true
+		pending = []
+		if clear.is_empty():
+			break
+		combo += 1
+		var hit := _expand(clear.keys(), bomb_target)
+		bomb_target = -1
+		# a cell that is turning into a special must survive this blast
+		var keep := {}
+		for cr in creations:
+			keep[cr["cell"]] = true
+		var final_cells: Array = []
+		for cell in hit:
+			if not keep.has(cell):
+				final_cells.append(cell)
+		if int(goal.get("kind", GOAL_SCORE)) == GOAL_COLLECT:
+			var want: int = int(goal["species"])
+			for cell in final_cells:
+				if grid[cell.y][cell.x] == want:
+					collected += 1
+		var gained: int = final_cells.size() * 10 * combo
+		score += gained
+		_update_score()
+		_show_combo(combo, gained)
+		_play("pop", min(1.0 + 0.09 * (combo - 1), 1.7))
+		await _pop(final_cells)
+		for cr in creations:
+			_make_special(cr["cell"], cr["kind"], cr["species"])
+		await _collapse()
+	_fade_combo()
+
+
+# --- special pair combos --------------------------------------------------
+#   stripe + stripe   full cross through the swap cell
+#   stripe + wrapped  three rows and three columns
+#   stripe + bomb     every piece of the partner species fires as a stripe
+#   wrapped + wrapped 5x5 blast
+#   wrapped + bomb    every piece of the partner species fires as a 3x3
+#   bomb + bomb       the whole board
+
+func _combo_name(ka: int, kb: int) -> String:
+	var n := {SP_STRIPE_H: "stripe", SP_STRIPE_V: "stripe",
+			SP_WRAPPED: "wrapped", SP_BOMB: "bomb"}
+	return "%s + %s!" % [n[ka], n[kb]]
+
+
+func _square(out: Dictionary, centre: Vector2i, radius: int) -> void:
+	for dr in range(-radius, radius + 1):
+		for dc in range(-radius, radius + 1):
+			var p := Vector2i(centre.x + dc, centre.y + dr)
+			if _in_bounds(p):
+				out[p] = true
+
+
+func _combo_blast(a: Vector2i, b: Vector2i, ka: int, kb: int) -> Array:
+	var stripes := 0
+	var wraps := 0
+	var bombs := 0
+	for k in [ka, kb]:
+		if k == SP_STRIPE_H or k == SP_STRIPE_V:
+			stripes += 1
+		elif k == SP_WRAPPED:
+			wraps += 1
+		elif k == SP_BOMB:
+			bombs += 1
+	# a bomb takes the colour of whatever it was combined with
+	var target: int = grid[b.y][b.x] if ka == SP_BOMB else grid[a.y][a.x]
+	var out := {}
+	out[a] = true
+	out[b] = true
+
+	if bombs == 2:
+		for r in ROWS:
+			for c in COLS:
+				out[Vector2i(c, r)] = true
+	elif bombs == 1 and stripes == 1:
+		for r in ROWS:
+			for c in COLS:
+				if grid[r][c] == target:
+					if (r + c) % 2 == 0:
+						for cc in COLS:
+							out[Vector2i(cc, r)] = true
+					else:
+						for rr in ROWS:
+							out[Vector2i(c, rr)] = true
+	elif bombs == 1 and wraps == 1:
+		for r in ROWS:
+			for c in COLS:
+				if grid[r][c] == target:
+					_square(out, Vector2i(c, r), 1)
+	elif stripes == 2:
+		for c in COLS:
+			out[Vector2i(c, b.y)] = true
+		for r in ROWS:
+			out[Vector2i(b.x, r)] = true
+	elif stripes == 1 and wraps == 1:
+		for d in range(-1, 2):
+			var rr: int = b.y + d
+			var cc: int = b.x + d
+			if rr >= 0 and rr < ROWS:
+				for c in COLS:
+					out[Vector2i(c, rr)] = true
+			if cc >= 0 and cc < COLS:
+				for r in ROWS:
+					out[Vector2i(cc, r)] = true
+	elif wraps == 2:
+		_square(out, b, 2)
+	return out.keys()
+
+
+# --- level outcome --------------------------------------------------------
+
+func _goal_total() -> int:
+	match int(goal.get("kind", GOAL_SCORE)):
+		GOAL_COLLECT: return int(goal["count"])
+		GOAL_JELLY:   return int(goal.get("total", 0))
+		_:            return int(goal.get("score", 0))
+
+
+func _goal_done() -> int:
+	match int(goal.get("kind", GOAL_SCORE)):
+		GOAL_COLLECT: return mini(collected, int(goal["count"]))
+		GOAL_JELLY:   return int(goal.get("total", 0)) - jelly_left
+		_:            return mini(score, int(goal.get("score", 0)))
+
+
+func _goal_met() -> bool:
+	return _goal_done() >= _goal_total()
+
+
+func _goal_text() -> String:
+	match int(goal.get("kind", GOAL_SCORE)):
+		GOAL_COLLECT:
+			return "collect %d %s   %d/%d" % [int(goal["count"]),
+				SPECIES_NAMES[int(goal["species"])], _goal_done(), int(goal["count"])]
+		GOAL_JELLY:
+			return "clear the jelly   %d left" % jelly_left
+		_:
+			return "target  %d" % int(goal.get("score", 0))
+
+
+func _stars_for(sc: int) -> int:
+	# stars always reflect score, whatever the level's goal is
+	if sc >= int(star_base * STAR_3):
+		return 3
+	if sc >= int(star_base * STAR_2):
+		return 2
+	if sc >= star_base:
+		return 1
+	return 0
+
+
+func _load_level(i: int) -> void:
+	level = clampi(i, 0, LEVELS.size() - 1)
+	var cfg: Dictionary = LEVELS[level]
+	species_count = cfg.get("species", SPECIES)
+	moves_left = cfg["moves"]
+	star_base = cfg["star_base"]
+	goal = (cfg["goal"] as Dictionary).duplicate(true)
+	target = int(goal.get("score", star_base))
+	collected = 0
+	_build_jelly()
+	score = 0
+	stars = 0
+	game_over = false
+	won = false
+	selected = Vector2i(-1, -1)
+	_hide_result()
+	_update_score()
+	_fill_board()
+
+
+func _refresh_jelly_view() -> void:
+	for ch in jelly_layer.get_children():
+		ch.queue_free()
+	if jelly.size() < ROWS:
+		return
+	var w := float(CELL - 6)
+	for r in ROWS:
+		for c in COLS:
+			if jelly[r][c] <= 0:
+				continue
+			var pg := Polygon2D.new()
+			pg.polygon = PackedVector2Array([Vector2(0, 0), Vector2(w, 0),
+					Vector2(w, w), Vector2(0, w)])
+			pg.position = ORIGIN + Vector2(c * CELL + 3, r * CELL + 3)
+			pg.color = Color(1.0, 0.56, 0.74, 0.26 if jelly[r][c] == 1 else 0.46)
+			jelly_layer.add_child(pg)
+
+
+func _build_jelly() -> void:
+	jelly = []
+	jelly_left = 0
+	for r in ROWS:
+		jelly.append([])
+		for c in COLS:
+			jelly[r].append(0)
+	if int(goal.get("kind", GOAL_SCORE)) != GOAL_JELLY:
+		_refresh_jelly_view()
+		return
+	var rows: Array = goal["layout"]
+	for r in mini(rows.size(), ROWS):
+		var line: String = rows[r]
+		for c in mini(line.length(), COLS):
+			var ch := line[c]
+			if ch == "1" or ch == "2":
+				var n := int(ch)
+				jelly[r][c] = n
+				jelly_left += n
+	goal["total"] = jelly_left
+	_refresh_jelly_view()
+
+
+func _hide_result() -> void:
+	overlay.visible = false
+	result_label.visible = false
+	result_sub.visible = false
+	for n in star_nodes:
+		n.visible = false
+
+
+func _check_outcome() -> void:
+	if game_over or no_finish:
+		return
+	if _goal_met():
+		_finish(true)
+	elif moves_left <= 0:
+		_finish(false)
+
+
+func _finish(did_win: bool) -> void:
+	game_over = true
+	won = did_win
+	stars = maxi(1, _stars_for(score)) if won else 0
+	selected = Vector2i(-1, -1)
+	if won:
+		best[level] = maxi(int(best.get(level, 0)), stars)
+		_save_progress()
+	if ui_font != null:
+		result_label.add_theme_font_override("font", ui_font)
+	result_label.text = "LEVEL CLEARED!" if won else "OUT OF MOVES"
+	result_label.add_theme_color_override("font_color",
+		Color("9fe3ff") if won else Color("ff95bb"))
+	if won and level + 1 < LEVELS.size():
+		result_sub.text = "score %d          SPACE for level %d     R to replay" \
+			% [score, level + 2]
+	elif won:
+		result_sub.text = "score %d          all levels cleared!     ESC for levels" % score
+	else:
+		result_sub.text = "score %d of %d          R to try again" % [score, target]
+	overlay.visible = true
+	result_label.visible = true
+	result_sub.visible = true
+	for i in 3:
+		star_nodes[i].texture = star_full if i < stars else star_empty
+		star_nodes[i].visible = won
+	_play("combo" if won else "invalid")
+
+
+func _load_progress() -> void:
+	var cf := ConfigFile.new()
+	var loaded: bool = cf.load(SAVE_PATH) == OK
+	for i in LEVELS.size():
+		best[i] = int(cf.get_value("stars", str(i), 0)) if loaded else 0
+
+
+func _save_progress() -> void:
+	var cf := ConfigFile.new()
+	for i in LEVELS.size():
+		cf.set_value("stars", str(i), int(best.get(i, 0)))
+	cf.save(SAVE_PATH)
+
+
+func _all_moves() -> Array:
+	# every legal swap, for the balance harness - picking the first one found
+	# biases play toward the top-left and is not a fair model of naive play
+	var out: Array = []
+	for r in ROWS:
+		for c in COLS:
+			if c + 1 < COLS and (special[r][c] != SP_NONE or special[r][c + 1] != SP_NONE
+					or _swap_makes_match(Vector2i(c, r), Vector2i(c + 1, r))):
+				out.append([Vector2i(c, r), Vector2i(c + 1, r)])
+			if r + 1 < ROWS and (special[r][c] != SP_NONE or special[r + 1][c] != SP_NONE
+					or _swap_makes_match(Vector2i(c, r), Vector2i(c, r + 1))):
+				out.append([Vector2i(c, r), Vector2i(c, r + 1)])
+	return out
+
+
+func _find_any_move() -> Array:
+	# first legal swap found - used by the balance harness, and the basis for
+	# a hint button if one is ever wanted
+	for r in ROWS:
+		for c in COLS:
+			if special[r][c] != SP_NONE and c + 1 < COLS:
+				return [Vector2i(c, r), Vector2i(c + 1, r)]
+			if c + 1 < COLS and _swap_makes_match(Vector2i(c, r), Vector2i(c + 1, r)):
+				return [Vector2i(c, r), Vector2i(c + 1, r)]
+			if r + 1 < ROWS and _swap_makes_match(Vector2i(c, r), Vector2i(c, r + 1)):
+				return [Vector2i(c, r), Vector2i(c, r + 1)]
+	return []
+
+
+# --- deadlock detection and reshuffle -------------------------------------
+
+func _swap_makes_match(a: Vector2i, b: Vector2i) -> bool:
+	var ga: int = grid[a.y][a.x]
+	var gb: int = grid[b.y][b.x]
+	if ga == gb:
+		return false
+	grid[a.y][a.x] = gb
+	grid[b.y][b.x] = ga
+	var hit: bool = not _find_matches().is_empty()
+	grid[a.y][a.x] = ga
+	grid[b.y][b.x] = gb
+	return hit
+
+
+func _has_legal_move() -> bool:
+	if grid.size() < ROWS:
+		return true
+	# any special is itself a move: swapping one always sets it off
+	for r in ROWS:
+		for c in COLS:
+			if special[r][c] != SP_NONE:
+				return true
+	for r in ROWS:
+		for c in COLS:
+			if c + 1 < COLS and _swap_makes_match(Vector2i(c, r), Vector2i(c + 1, r)):
+				return true
+			if r + 1 < ROWS and _swap_makes_match(Vector2i(c, r), Vector2i(c, r + 1)):
+				return true
+	return false
+
+
+func _arrange(cells: Array, bag: Array) -> void:
+	# Greedy placement in row-major order, same rule as the initial fill:
+	# prefer a species that does not complete a run with the cells already
+	# placed to the left and above. Random reshuffles of a low-variety board
+	# almost always contain a ready-made match, this almost never does.
+	var pool: Array = bag.duplicate()
+	pool.shuffle()
+	for cell in cells:
+		var pick := -1
+		for i in pool.size():
+			if not _would_match(cell.y, cell.x, pool[i]):
+				pick = i
+				break
+		if pick < 0:
+			pick = 0
+		grid[cell.y][cell.x] = pool[pick]
+		pool.remove_at(pick)
+
+
+func _reshuffle() -> bool:
+	# Shuffle the plain pieces in place, keeping the species multiset, until the
+	# board has no ready-made match but does have at least one legal move.
+	var cells: Array = []
+	var bag: Array = []
+	for r in ROWS:
+		for c in COLS:
+			if special[r][c] == SP_NONE and grid[r][c] >= 0:
+				cells.append(Vector2i(c, r))
+				bag.append(grid[r][c])
+	if cells.size() < 2:
+		return false
+	var found := false
+	for attempt in 30:
+		_arrange(cells, bag)
+		if _find_matches().is_empty() and _has_legal_move():
+			found = true
+			break
+	if not found:
+		return false
+	if fast:
+		for cell in cells:
+			pieces[cell.y][cell.x].sprite_frames = frames[grid[cell.y][cell.x]]
+		return true
+	_show_notice("no moves - shuffling")
+	_play("shuffle")
+	var out := create_tween().set_parallel(true)
+	for cell in cells:
+		out.tween_property(pieces[cell.y][cell.x], "scale", Vector2(0.2, 0.2), 0.16) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	await out.finished
+	for cell in cells:
+		var sp: AnimatedSprite2D = pieces[cell.y][cell.x]
+		sp.sprite_frames = frames[grid[cell.y][cell.x]]
+		sp.play("idle")
+		sp.frame = randi() % IDLE_DUR.size()
+	var back := create_tween().set_parallel(true)
+	for cell in cells:
+		back.tween_property(pieces[cell.y][cell.x], "scale", Vector2(2, 2), 0.24) \
+			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	await back.finished
+	_hide_notice()
+	return true
+
+
+func _settle() -> void:
+	# Resolve anything outstanding, then guarantee the board is playable.
+	var guard := 0
+	while guard < 20:
+		guard += 1
+		if not _find_matches().is_empty():
+			await _resolve()
+			continue
+		if _has_legal_move():
+			return
+		var shuffled: bool = await _reshuffle()
+		if not shuffled:
+			_fill_board()
+
+
+func _restart() -> void:
+	busy = true
+	_load_level(level)
+	await _settle()
+	busy = false
+
+
+func _next_level() -> void:
+	if level + 1 >= LEVELS.size():
+		_goto(ST_SELECT)
+		return
+	busy = true
+	_load_level(level + 1)
+	await _settle()
+	busy = false
+
+
+# --- dev harnesses --------------------------------------------------------
+
+func _save_shot(path: String) -> void:
+	await RenderingServer.frame_post_draw
+	var img := get_viewport().get_texture().get_image()
+	img.save_png(path)
+
+
+func _auto_shot() -> void:
+	await _start_level(0)
+	await get_tree().create_timer(0.5).timeout
+	await _save_shot("user://shot.png")
+	get_tree().quit()
+
+
+func _shot_pop() -> void:
+	await _start_level(0)
+	await get_tree().create_timer(0.4).timeout
+	_force_triple()
+	_resolve()
+	await get_tree().create_timer(0.22).timeout
+	await _save_shot("user://shot_pop.png")
+	get_tree().quit()
+
+
+func _shot_special() -> void:
+	await _start_level(0)
+	await get_tree().create_timer(0.3).timeout
+	_make_special(Vector2i(1, 1), SP_STRIPE_H, 0)
+	_make_special(Vector2i(3, 1), SP_STRIPE_V, 1)
+	_make_special(Vector2i(5, 1), SP_WRAPPED, 2)
+	_make_special(Vector2i(7, 1), SP_BOMB, 3)
+	_make_special(Vector2i(2, 3), SP_STRIPE_V, 4)
+	_make_special(Vector2i(5, 3), SP_WRAPPED, 5)
+	score = 1240
+	_update_score()
+	_show_combo(4, 880)
+	await get_tree().create_timer(0.45).timeout
+	await _save_shot("user://shot_special.png")
+	get_tree().quit()
+
+
+func _shot_jelly() -> void:
+	await _start_level(3)
+	await get_tree().create_timer(0.4).timeout
+	await _save_shot("user://shot_jelly.png")
+	music.stop()
+	get_tree().quit()
+
+
+func _shot_menu() -> void:
+	await get_tree().create_timer(0.5).timeout
+	await _save_shot("user://shot_menu.png")
+	music.stop()
+	get_tree().quit()
+
+
+func _shot_select() -> void:
+	best[0] = 3
+	best[1] = 2
+	best[2] = 1
+	_goto(ST_SELECT)
+	await get_tree().create_timer(0.4).timeout
+	await _save_shot("user://shot_select.png")
+	music.stop()
+	get_tree().quit()
+
+
+func _shot_win() -> void:
+	await _start_level(0)
+	await get_tree().create_timer(0.4).timeout
+	score = 1340
+	moves_left = 3
+	_update_score()
+	_finish(true)
+	await get_tree().create_timer(0.35).timeout
+	await _save_shot("user://shot_win.png")
+	music.stop()
+	get_tree().quit()
+
+
+func _balance() -> void:
+	# Play random legal moves with animation skipped, to see what each level's
+	# move budget actually yields. The target is then set from the mean.
+	await _start_level(0)
+	fast = true
+	no_finish = true
+	for i in LEVELS.size():
+		var cfg: Dictionary = LEVELS[i]
+		var runs: Array = []
+		var goals: Array = []
+		for trial in 30:
+			_load_level(i)
+			await _settle()
+			for m in cfg["moves"]:
+				var opts := _all_moves()
+				if opts.is_empty():
+					break
+				var mv: Array = opts[randi() % opts.size()]
+				await _try_swap(mv[0], mv[1])
+			runs.append(score)
+			goals.append(collected if int(goal["kind"]) == GOAL_COLLECT else _goal_done())
+			await get_tree().process_frame     # let freed nodes go
+		var total := 0
+		for v in runs:
+			total += v
+		var mean: int = total / runs.size()
+		runs.sort()
+		var median: int = runs[runs.size() / 2]
+		goals.sort()
+		var gmed: int = goals[goals.size() / 2]
+		print("[balance] L%d moves=%2d  score med=%5d (min %4d max %5d)   goal med=%3d (min %3d max %3d) of %d"
+			% [i + 1, cfg["moves"], median, runs[0], runs[runs.size() - 1],
+			gmed, goals[0], goals[goals.size() - 1], _goal_total()])
+	fast = false
+	no_finish = false
+	music.stop()
+	get_tree().quit()
+
+
+func _shot_combo() -> void:
+	await _start_level(0)
+	await get_tree().create_timer(0.35).timeout
+	var A := Vector2i(3, 4)
+	var B := Vector2i(4, 4)
+	_make_special(A, SP_STRIPE_H, grid[A.y][A.x])
+	_make_special(B, SP_BOMB, grid[B.y][B.x])
+	await get_tree().create_timer(0.3).timeout
+	var cells := _combo_blast(A, B, SP_STRIPE_H, SP_BOMB)
+	special[A.y][A.x] = SP_NONE
+	special[B.y][B.x] = SP_NONE
+	_show_notice(_combo_name(SP_STRIPE_H, SP_BOMB))
+	_resolve(cells, -1)
+	await get_tree().create_timer(0.2).timeout
+	await _save_shot("user://shot_combo.png")
+	get_tree().quit()
+
+
+func _shot_shuffle() -> void:
+	await _start_level(0)
+	await get_tree().create_timer(0.3).timeout
+	for r in ROWS:
+		for c in COLS:
+			grid[r][c] = (r + c) % 3
+			special[r][c] = SP_NONE
+			pieces[r][c].sprite_frames = frames[grid[r][c]]
+	_settle()
+	await get_tree().create_timer(0.12).timeout
+	await _save_shot("user://shot_shuffle.png")
+	get_tree().quit()
+
+
+func _force_triple() -> int:
+	var s: int = grid[0][0]
+	for c in 3:
+		grid[0][c] = s
+		pieces[0][c].sprite_frames = frames[s]
+	return s
+
+
+# diagonal fill: no two neighbours share a species, so nothing matches
+func _reset_flat() -> void:
+	_build_jelly()
+	for r in ROWS:
+		for c in COLS:
+			grid[r][c] = (r + c) % SPECIES
+			special[r][c] = SP_NONE
+
+
+func _plant(r: int, c: int, n: int, s: int, horizontal: bool) -> void:
+	for k in n:
+		if horizontal:
+			grid[r][c + k] = s
+		else:
+			grid[r + k][c] = s
+
+
+func _group_at(cell: Vector2i) -> Dictionary:
+	for g in _groups():
+		if g["cells"].has(cell):
+			return g
+	return {}
+
+
+func _count_special(kind: int) -> int:
+	var n := 0
+	for r in ROWS:
+		for c in COLS:
+			if special[r][c] == kind:
+				n += 1
+	return n
+
+
+func _check(name: String, got, want) -> bool:
+	var ok: bool = got == want
+	print("[%s] %-22s got=%s want=%s" % ["PASS" if ok else "FAIL", name, str(got), str(want)])
+	return ok
+
+
+func _selftest() -> void:
+	await _start_level(0)
+	await get_tree().process_frame
+	var ok := true
+
+	# classification
+	_reset_flat()
+	_plant(3, 2, 4, 0, true)
+	ok = _check("classify_4h", _classify(_group_at(Vector2i(2, 3))), SP_STRIPE_H) and ok
+
+	_reset_flat()
+	_plant(1, 3, 4, 0, false)
+	ok = _check("classify_4v", _classify(_group_at(Vector2i(3, 1))), SP_STRIPE_V) and ok
+
+	_reset_flat()
+	_plant(3, 1, 5, 0, true)
+	ok = _check("classify_5h", _classify(_group_at(Vector2i(1, 3))), SP_BOMB) and ok
+
+	# L shape: a horizontal run and a vertical run sharing a corner
+	_reset_flat()
+	_plant(3, 2, 3, 0, true)
+	_plant(3, 2, 3, 0, false)
+	ok = _check("classify_L", _classify(_group_at(Vector2i(2, 3))), SP_WRAPPED) and ok
+
+	# blast shapes
+	_reset_flat()
+	special[4][4] = SP_STRIPE_H
+	ok = _check("blast_stripe_h", _expand([Vector2i(4, 4)], -1).size(), COLS) and ok
+
+	_reset_flat()
+	special[4][4] = SP_STRIPE_V
+	ok = _check("blast_stripe_v", _expand([Vector2i(4, 4)], -1).size(), ROWS) and ok
+
+	_reset_flat()
+	special[4][4] = SP_WRAPPED
+	ok = _check("blast_wrapped", _expand([Vector2i(4, 4)], -1).size(), 9) and ok
+
+	_reset_flat()
+	var want_bomb := 1
+	for r in ROWS:
+		for c in COLS:
+			if grid[r][c] == 3:
+				want_bomb += 1
+	grid[4][4] = 0
+	special[4][4] = SP_BOMB
+	ok = _check("blast_bomb", _expand([Vector2i(4, 4)], 3).size(), want_bomb) and ok
+
+	# chained specials: a stripe in the blast radius of another stripe
+	_reset_flat()
+	special[4][4] = SP_STRIPE_H
+	special[4][6] = SP_STRIPE_V
+	ok = _check("blast_chained", _expand([Vector2i(4, 4)], -1).size(), COLS + ROWS - 1) and ok
+
+	# full cascade from a real match
+	_reset_flat()
+	for r in ROWS:
+		for c in COLS:
+			pieces[r][c].sprite_frames = frames[grid[r][c]]
+	_plant(3, 2, 4, 0, true)
+	last_swap = [Vector2i(3, 3)]
+	await _resolve()
+	last_swap = []
+	var empty := 0
+	for r in ROWS:
+		for c in COLS:
+			if grid[r][c] < 0:
+				empty += 1
+	var sprites := 0
+	for ch in board_layer.get_children():
+		if ch is AnimatedSprite2D:
+			sprites += 1
+	ok = _check("cascade_empty", empty, 0) and ok
+	ok = _check("cascade_matches", _find_matches().size(), 0) and ok
+	ok = _check("cascade_sprites", sprites, ROWS * COLS) and ok
+	ok = _check("stripe_created", _count_special(SP_STRIPE_H) >= 1, true) and ok
+
+	# deadlock detection: the 3-species diagonal has no legal swap at all
+	for r in ROWS:
+		for c in COLS:
+			grid[r][c] = (r + c) % 3
+			special[r][c] = SP_NONE
+	ok = _check("deadlock_no_match", _find_matches().size(), 0) and ok
+	ok = _check("deadlock_no_move", _has_legal_move(), false) and ok
+
+	# a board with a reachable match must report a move
+	_reset_flat()
+	grid[0][0] = 0
+	grid[0][1] = 0
+	grid[1][2] = 0
+	ok = _check("move_exists", _has_legal_move(), true) and ok
+
+	# a special on the board always counts as a move
+	for r in ROWS:
+		for c in COLS:
+			grid[r][c] = (r + c) % 3
+			special[r][c] = SP_NONE
+	special[4][4] = SP_BOMB
+	ok = _check("special_is_move", _has_legal_move(), true) and ok
+
+	# reshuffle rescues a deadlocked board
+	for r in ROWS:
+		for c in COLS:
+			grid[r][c] = (r + c) % 3
+			special[r][c] = SP_NONE
+			pieces[r][c].sprite_frames = frames[grid[r][c]]
+	var shuffled: bool = await _reshuffle()
+	ok = _check("reshuffle_ok", shuffled, true) and ok
+	ok = _check("reshuffle_no_match", _find_matches().size(), 0) and ok
+	ok = _check("reshuffle_has_move", _has_legal_move(), true) and ok
+
+
+	# --- special pair combos
+	_reset_flat()
+	var A := Vector2i(4, 4)
+	var B := Vector2i(5, 4)
+	ok = _check("combo_stripe_stripe",
+		_combo_blast(A, B, SP_STRIPE_H, SP_STRIPE_V).size(), COLS + ROWS - 1) and ok
+	ok = _check("combo_wrapped_pair",
+		_combo_blast(A, B, SP_WRAPPED, SP_WRAPPED).size(), 25) and ok
+	ok = _check("combo_stripe_wrapped",
+		_combo_blast(A, B, SP_STRIPE_H, SP_WRAPPED).size(), 3 * COLS + 3 * ROWS - 9) and ok
+	ok = _check("combo_bomb_bomb",
+		_combo_blast(A, B, SP_BOMB, SP_BOMB).size(), ROWS * COLS) and ok
+
+	# bomb pairings must catch every piece of the partner species and reach
+	# further than those pieces alone
+	for pair in [[SP_STRIPE_H, "stripe"], [SP_WRAPPED, "wrapped"]]:
+		var hit := {}
+		for cell in _combo_blast(A, B, SP_BOMB, pair[0]):
+			hit[cell] = true
+		var tgt: int = grid[B.y][B.x]
+		var tgt_n := 0
+		var covered := true
+		for r in ROWS:
+			for c in COLS:
+				if grid[r][c] == tgt:
+					tgt_n += 1
+					if not hit.has(Vector2i(c, r)):
+						covered = false
+		ok = _check("combo_bomb_%s_covers" % pair[1], covered, true) and ok
+		ok = _check("combo_bomb_%s_wider" % pair[1], hit.size() > tgt_n, true) and ok
+
+	# a combo must leave a stable, full board
+	_reset_flat()
+	for r in ROWS:
+		for c in COLS:
+			pieces[r][c].sprite_frames = frames[grid[r][c]]
+	special[B.y][B.x] = SP_STRIPE_V
+	special[A.y][A.x] = SP_STRIPE_H
+	var ccells := _combo_blast(A, B, SP_STRIPE_H, SP_STRIPE_V)
+	special[A.y][A.x] = SP_NONE
+	special[B.y][B.x] = SP_NONE
+	await _resolve(ccells, -1)
+	var empty2 := 0
+	for r in ROWS:
+		for c in COLS:
+			if grid[r][c] < 0:
+				empty2 += 1
+	var sprites2 := 0
+	for ch in board_layer.get_children():
+		if ch is AnimatedSprite2D:
+			sprites2 += 1
+	ok = _check("combo_settles_empty", empty2, 0) and ok
+	ok = _check("combo_settles_sprites", sprites2, ROWS * COLS) and ok
+
+
+	# --- audio
+	var audio_ok: bool = music != null and music.stream != null
+	for key in SFX:
+		var pl = sfx.get(key)
+		if pl == null or pl.stream == null:
+			audio_ok = false
+	ok = _check("audio_loaded", audio_ok, true) and ok
+	ok = _check("audio_sfx_count", sfx.size(), SFX.size()) and ok
+	var loops: bool = music.stream is AudioStreamWAV \
+		and music.stream.loop_mode != AudioStreamWAV.LOOP_DISABLED
+	ok = _check("audio_music_loops", loops, true) and ok
+
+	ok = _check("audio_loop_end", music.stream.loop_end > 0, true) and ok
+	var voices_ok: bool = voices.size() == SPECIES
+	for v in voices:
+		if v == null:
+			voices_ok = false
+	ok = _check("audio_voices", voices_ok, true) and ok
+	ok = _check("star_texture", star_full != null and star_full.atlas != null, true) and ok
+	ok = _check("bg_texture", bg_back != null and bg_back.texture != null, true) and ok
+	ok = _check("font_loaded", ui_font != null, true) and ok
+	# the font is caps-only by design; without the a-z aliases every lowercase
+	# string in the UI rendered as tofu boxes
+	var missing := ""
+	for code in range(97, 123):
+		if not ui_font.has_char(code):
+			missing += char(code)
+	ok = _check("font_lowercase", missing, "") and ok
+	ok = _check("font_digits", ui_font.has_char(48) and ui_font.has_char(57), true) and ok
+	# the two soft vignettes replacing the old scrim rectangle
+	var fades := 0
+	for ch in hud_layer.get_children():
+		if ch is Sprite2D and ch.texture != null:
+			fades += 1
+	ok = _check("ui_fades", fades, 2) and ok
+	# the top slice must line up with the board origin or the seam shows
+	var slice: AtlasTexture = bg_front.texture
+	ok = _check("bg_front_slice", slice.region.size.y * 2.0, ORIGIN.y) and ok
+	# nothing belonging to a screen may hang off the root, or it shows everywhere
+	var strays := 0
+	for ch in get_children():
+		if ch is Label or ch is ColorRect or ch is Button or ch is TextureRect \
+				or ch is AnimatedSprite2D:
+			strays += 1
+	ok = _check("no_stray_widgets", strays, 0) and ok
+
+	# the jelly overlay sits over the board, so it must not be input-grabbing
+	_load_level(3)
+	var controls := 0
+	for ch in jelly_layer.get_children():
+		if ch is Control:
+			controls += 1
+	ok = _check("jelly_view_count", jelly_layer.get_child_count() > 0, true) and ok
+	ok = _check("jelly_view_no_controls", controls, 0) and ok
+	_load_level(0)
+
+	# board queries must be safe before any level is loaded
+	var kept_grid := grid
+	var kept_special := special
+	grid = []
+	special = []
+	ok = _check("empty_board_matches", _find_matches().size(), 0) and ok
+	ok = _check("empty_board_move", _has_legal_move(), true) and ok
+	await _settle()
+	grid = kept_grid
+	special = kept_special
+
+	# selecting a piece must cue that species' own voice
+	_reset_flat()
+	var mapped := true
+	for i in SPECIES:
+		grid[2][2] = i
+		_select(Vector2i(2, 2))
+		if voice_player.stream != voices[i]:
+			mapped = false
+	selected = Vector2i(-1, -1)
+	ok = _check("voice_per_species", mapped, true) and ok
+
+
+	# --- level: a swap that does nothing must be free
+	_reset_flat()
+	for r in ROWS:
+		for c in COLS:
+			pieces[r][c].sprite_frames = frames[grid[r][c]]
+	score = 0
+	game_over = false
+	moves_left = 10
+	await _try_swap(Vector2i(0, 0), Vector2i(1, 0))
+	ok = _check("move_free_on_revert", moves_left, 10) and ok
+
+	# a swap that matches must cost exactly one
+	_reset_flat()
+	for r in ROWS:
+		for c in COLS:
+			pieces[r][c].sprite_frames = frames[grid[r][c]]
+	grid[3][2] = 0
+	grid[3][3] = 0
+	grid[4][4] = 0
+	score = 0
+	game_over = false
+	moves_left = 10
+	await _try_swap(Vector2i(4, 4), Vector2i(4, 3))
+	ok = _check("move_spent_on_match", moves_left, 9) and ok
+
+	# --- level: outcomes (level 0 is a score goal)
+	_load_level(0)
+	game_over = false
+	won = false
+	score = target
+	moves_left = 5
+	_check_outcome()
+	ok = _check("level_win", game_over and won, true) and ok
+
+	game_over = false
+	won = false
+	score = 0
+	moves_left = 0
+	_check_outcome()
+	ok = _check("level_lose", game_over and not won, true) and ok
+
+	game_over = false
+	won = false
+	score = 10
+	moves_left = 3
+	_check_outcome()
+	ok = _check("level_runs_on", game_over, false) and ok
+
+	# restart must reload the current level
+	game_over = true
+	score = 999
+	moves_left = 0
+	await _restart()
+	ok = _check("restart_moves", moves_left, LEVELS[level]["moves"]) and ok
+	ok = _check("restart_live", game_over, false) and ok
+
+	# --- levels and stars
+	_load_level(2)
+	ok = _check("level_load_moves", moves_left, LEVELS[2]["moves"]) and ok
+	ok = _check("level_load_target", target, int(LEVELS[2]["goal"]["score"])) and ok
+	ok = _check("level_load_score", score, 0) and ok
+
+	star_base = 1000
+	ok = _check("stars_none", _stars_for(999), 0) and ok
+	ok = _check("stars_one", _stars_for(1000), 1) and ok
+	ok = _check("stars_two", _stars_for(int(1000 * STAR_2)), 2) and ok
+	ok = _check("stars_three", _stars_for(int(1000 * STAR_3)), 3) and ok
+
+	# clearing a level banks the best star count and persists it
+	_load_level(1)
+	collected = int(LEVELS[1]["goal"]["count"])
+	score = int(LEVELS[1]["star_base"] * STAR_2)
+	_check_outcome()
+	ok = _check("win_banks_stars", int(best.get(1, 0)), 2) and ok
+	best[1] = 0
+	_load_progress()
+	ok = _check("progress_persisted", int(best.get(1, 0)), 2) and ok
+
+	# a lower score must not lower the banked stars
+	_load_level(1)
+	collected = int(LEVELS[1]["goal"]["count"])
+	score = LEVELS[1]["star_base"]
+	_check_outcome()
+	ok = _check("best_not_lowered", int(best.get(1, 0)), 2) and ok
+
+	await _next_level()
+	ok = _check("next_level", level, 2) and ok
+	ok = _check("next_level_target", target, int(LEVELS[2]["goal"]["score"])) and ok
+	_load_level(0)
+
+	# --- goals
+	_load_level(1)                                   # collect level
+	ok = _check("goal_collect_total", _goal_total(), int(LEVELS[1]["goal"]["count"])) and ok
+	ok = _check("goal_collect_start", _goal_done(), 0) and ok
+	collected = int(LEVELS[1]["goal"]["count"])
+	ok = _check("goal_collect_met", _goal_met(), true) and ok
+
+	_load_level(3)                                   # jelly level
+	var jelly_expected := 0
+	for line in LEVELS[3]["goal"]["layout"]:
+		for ch in line:
+			if ch == "1" or ch == "2":
+				jelly_expected += int(ch)
+	ok = _check("goal_jelly_total", jelly_left, jelly_expected) and ok
+	ok = _check("goal_jelly_unmet", _goal_met(), false) and ok
+	jelly_left = 0
+	ok = _check("goal_jelly_met", _goal_met(), true) and ok
+
+	# a double jelly cell takes two clears
+	_load_level(3)
+	jelly[5][2] = 2
+	jelly_left = 2
+	await _pop([Vector2i(2, 5)])
+	ok = _check("jelly_one_layer_left", jelly[5][2], 1) and ok
+	ok = _check("jelly_count_down", jelly_left, 1) and ok
+
+	# jelly belongs to the cell, not the piece: a collapse must not drag it
+	_load_level(3)
+	for r in ROWS:
+		for c in COLS:
+			jelly[r][c] = 0
+	jelly[7][3] = 1
+	jelly_left = 1
+	await _pop([Vector2i(3, 3)])
+	await _collapse()
+	ok = _check("jelly_stays_put", jelly[7][3], 1) and ok
+	ok = _check("jelly_not_dragged", jelly[3][3], 0) and ok
+	ok = _check("jelly_count_intact", jelly_left, 1) and ok
+
+	# winning a non-score goal still banks a star even on a low score
+	_load_level(1)
+	collected = int(LEVELS[1]["goal"]["count"])
+	score = 10
+	best[1] = 0
+	_check_outcome()
+	ok = _check("win_min_one_star", stars, 1) and ok
+	ok = _check("win_on_collect", won, true) and ok
+
+	# running out of moves with the goal unmet still loses
+	_load_level(1)
+	moves_left = 0
+	score = 99999
+	_check_outcome()
+	ok = _check("lose_on_unmet_goal", won, false) and ok
+	for i in LEVELS.size():
+		best[i] = 0
+	_save_progress()
+	_load_level(0)
+
+	# --- screens
+	_goto(ST_MENU)
+	ok = _check("menu_hides_board", board_layer.visible, false) and ok
+	ok = _check("menu_shows_menu", menu_layer.visible, true) and ok
+	await _start_level(1)
+	ok = _check("play_shows_board", board_layer.visible and state == ST_PLAY, true) and ok
+	ok = _check("play_level", level, 1) and ok
+
+	# unlock gating: a level opens once the one before it has a star
+	for i in LEVELS.size():
+		best[i] = 0
+	_refresh_select()
+	ok = _check("lock_first_open", select_buttons[0].disabled, false) and ok
+	ok = _check("lock_second_shut", select_buttons[1].disabled, true) and ok
+	best[0] = 1
+	_refresh_select()
+	ok = _check("lock_second_open", select_buttons[1].disabled, false) and ok
+	ok = _check("lock_third_shut", select_buttons[2].disabled, true) and ok
+
+	ok = _check("next_unplayed_first", _next_unplayed(), 1) and ok
+	best[1] = 3
+	ok = _check("next_unplayed_skips", _next_unplayed(), 2) and ok
+	for i in LEVELS.size():
+		best[i] = 0
+	_save_progress()
+	_goto(ST_MENU)
+
+	print("[selftest] %s   score=%d" % ["ALL PASS" if ok else "FAILURES", score])
+	music.stop()
+	get_tree().quit()

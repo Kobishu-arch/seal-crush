@@ -1,0 +1,10 @@
+# Godot's import cache and generated data
+.godot/
+
+# Web/desktop export output
+build/
+*.zip
+
+# Python bytecode from the art and audio generators
+__pycache__/
+*.pyc
