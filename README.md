@@ -293,6 +293,32 @@ Note: Godot 4.7's wav importer does not carry `edit/loop_mode` onto the
 resource when `compress/mode` is QOA, so the music loop is set on the stream
 in `_build_audio()`, with a `finished` reconnect as a safety net.
 
+## Play it
+
+**https://kobishu-arch.github.io/seal-crush/**
+
+Published by GitHub Actions on every push to `main`. Verified end to end: the
+page loads, the menu renders, PLAY starts a level and the browser console is
+clean.
+
+### Progress and saves
+
+Progress is per visitor, in their own browser. The game writes
+`user://progress.cfg`, which Godot's web build maps to **IndexedDB** through
+Emscripten's IDBFS (mounted at `/userfs`, flushed with `syncfs`). There is no
+server, so nothing is shared, nothing syncs across devices, and nobody - the
+author included - can read anyone else's progress.
+
+Two consequences worth knowing:
+
+- **iOS Safari evicts it.** Script-writable storage, IndexedDB included, is
+  deleted after roughly 7 days without interaction. Casual iPhone visitors will
+  lose their stars.
+- **The store is per origin, not per path.** IDBFS keys its database on the
+  mount point, so every Godot build on `kobishu-arch.github.io` shares one
+  `/userfs` store. A second game writing `progress.cfg` would collide with this
+  one.
+
 ## Web build
 
     godot4 --headless --path . --export-release "Web" build/index.html
@@ -338,8 +364,12 @@ The gate works because `_selftest()` now ends with `get_tree().quit(0 if ok
 else 1)`. Without that it always exited 0 and CI would have deployed over a
 failing assertion - a gate that cannot fail is not a gate.
 
-Pages has to be enabled once: *Settings -> Pages -> Source: GitHub Actions*.
-The repo must be public for Pages on a free plan.
+**Enable Pages by hand before the first run**: *Settings -> Pages -> Source:
+GitHub Actions*. `configure-pages` fails outright when the repository has no
+Pages site, and `enablement: true` did not create one either - the default
+`GITHUB_TOKEN` could not, despite `pages: write`. Two runs died on this before
+the setting was flipped manually. The repo must be public for Pages on a free
+plan.
 
 ### Export templates
 
