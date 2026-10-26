@@ -36,6 +36,14 @@ to alpha 0.025/0.055, just enough structure to read as a grid.
 above the pieces, which is what hides pieces falling in from above the board. A
 test asserts that slice height matches `ORIGIN.y`.
 
+### Free reshuffle
+
+`S` rearranges the board once per level. It costs no move and leaves score,
+goal progress and the move counter untouched - it runs the same routine the
+deadlock rescue uses, so the result is still match-free and still has a legal
+move. If no valid arrangement is found the shuffle is refunded rather than
+silently consumed. The remaining count shows in the key line.
+
 ### Legend
 
 The play screen's help was one run-on line of text, which did not scan. It is

@@ -53,6 +53,12 @@ const LEVELS := [
 	{"moves": 22, "star_base": 1700,
 		"goal": {"kind": GOAL_JELLY, "layout": JELLY_WIDE}},
 ]
+# Score levels rate on score. Goal levels rate on efficiency instead: a
+# collect or jelly level ends the moment the goal is met, so score at that
+# instant barely moves and every clear scored exactly 1 star. Moves left is
+# both reachable and the thing skill actually controls.
+const STAR_2_MOVES := 0.25      # fraction of the move budget still unspent
+const STAR_3_MOVES := 0.45
 const STAR_2 := 1.3          # multiples of target
 const STAR_3 := 1.6
 const SAVE_PATH := "user://progress.cfg"
@@ -91,6 +97,7 @@ var score := 0
 var score_label: Label
 var combo_label: Label
 var notice_label: Label
+var keys_label: Label
 var sfx: Dictionary = {}
 var music: AudioStreamPlayer
 var muted := false
@@ -132,6 +139,7 @@ var collected := 0             # pieces of the goal species cleared this level
 var goal: Dictionary = {}
 var star_base := 0
 var no_finish := false   # dev: balance harness plays every move
+var shuffles_left := 0
 var fast := false          # dev: skip animation waits (balance harness)
 var won := false
 var moves_label: Label
@@ -790,8 +798,9 @@ func _build_legend() -> void:
 		hud_layer.add_child(ic)
 		x += cw + gap
 
-	var keys := Label.new()
-	keys.text = "R RETRY        ESC LEVELS        M MUTE"
+	keys_label = Label.new()
+	var keys := keys_label
+	keys.text = "R RETRY     ESC LEVELS     M MUTE"
 	keys.position = Vector2(0, 728)
 	keys.size = Vector2(640, 20)
 	keys.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -822,6 +831,8 @@ func _update_score() -> void:
 	moves_label.text = "moves  %d" % max(moves_left, 0)
 	target_label.text = _goal_text()
 	level_label.text = "LEVEL %d/%d" % [level + 1, LEVELS.size()]
+	if keys_label != null:
+		keys_label.text = "S SHUFFLE (%d)     R RETRY     ESC LEVELS     M MUTE" % shuffles_left
 	var frac: float = clampf(float(_goal_done()) / float(maxi(_goal_total(), 1)), 0.0, 1.0)
 	bar_fill.size = Vector2(512.0 * frac, 6)
 
@@ -1546,6 +1557,18 @@ func _goal_text() -> String:
 			return "target  %d" % int(goal.get("score", 0))
 
 
+func _stars_earned() -> int:
+	if int(goal.get("kind", GOAL_SCORE)) == GOAL_SCORE:
+		return _stars_for(score)
+	var budget: float = float(LEVELS[level]["moves"])
+	var left: float = float(maxi(moves_left, 0)) / maxf(budget, 1.0)
+	if left >= STAR_3_MOVES:
+		return 3
+	if left >= STAR_2_MOVES:
+		return 2
+	return 1
+
+
 func _stars_for(sc: int) -> int:
 	# stars always reflect score, whatever the level's goal is
 	if sc >= int(star_base * STAR_3):
@@ -1566,6 +1589,7 @@ func _load_level(i: int) -> void:
 	goal = (cfg["goal"] as Dictionary).duplicate(true)
 	target = int(goal.get("score", star_base))
 	collected = 0
+	shuffles_left = 1
 	_build_jelly()
 	score = 0
 	stars = 0
@@ -1643,7 +1667,7 @@ func _check_outcome() -> void:
 func _finish(did_win: bool) -> void:
 	game_over = true
 	won = did_win
-	stars = maxi(1, _stars_for(score)) if won else 0
+	stars = maxi(1, _stars_earned()) if won else 0
 	selected = Vector2i(-1, -1)
 	if won:
 		best[level] = maxi(int(best.get(level, 0)), stars)
@@ -1763,7 +1787,24 @@ func _arrange(cells: Array, bag: Array) -> void:
 		pool.remove_at(pick)
 
 
-func _reshuffle() -> bool:
+func _use_shuffle() -> void:
+	# A free rearrange that costs no move and keeps score and progress. The
+	# board is reshuffled by the same routine the deadlock rescue uses, so the
+	# result is still match-free and still has a legal move.
+	if busy or game_over or shuffles_left <= 0:
+		return
+	busy = true
+	shuffles_left -= 1
+	_update_score()
+	var done: bool = await _reshuffle("shuffling the board")
+	if not done:
+		shuffles_left += 1      # could not arrange one; do not charge for it
+		_update_score()
+	await _settle()
+	busy = false
+
+
+func _reshuffle(notice: String = "no moves - shuffling") -> bool:
 	# Shuffle the plain pieces in place, keeping the species multiset, until the
 	# board has no ready-made match but does have at least one legal move.
 	var cells: Array = []
@@ -1787,7 +1828,7 @@ func _reshuffle() -> bool:
 		for cell in cells:
 			pieces[cell.y][cell.x].sprite_frames = frames[grid[cell.y][cell.x]]
 		return true
-	_show_notice("no moves - shuffling")
+	_show_notice(notice)
 	_play("shuffle")
 	var out := create_tween().set_parallel(true)
 	for cell in cells:
@@ -2397,9 +2438,9 @@ func _selftest() -> void:
 	ok = _check("stars_three", _stars_for(int(1000 * STAR_3)), 3) and ok
 
 	# clearing a level banks the best star count and persists it
-	_load_level(1)
+	_load_level(1)                                   # collect level: moves rate it
 	collected = int(LEVELS[1]["goal"]["count"])
-	score = int(LEVELS[1]["star_base"] * STAR_2)
+	moves_left = 7                                   # 7/22 = 0.32 -> two stars
 	_check_outcome()
 	ok = _check("win_banks_stars", int(best.get(1, 0)), 2) and ok
 	best[1] = 0
@@ -2409,7 +2450,7 @@ func _selftest() -> void:
 	# a lower score must not lower the banked stars
 	_load_level(1)
 	collected = int(LEVELS[1]["goal"]["count"])
-	score = LEVELS[1]["star_base"]
+	moves_left = 1                                   # 1/22 -> one star only
 	_check_outcome()
 	ok = _check("best_not_lowered", int(best.get(1, 0)), 2) and ok
 
@@ -2417,6 +2458,37 @@ func _selftest() -> void:
 	ok = _check("next_level", level, 2) and ok
 	ok = _check("next_level_target", target, int(LEVELS[2]["goal"]["score"])) and ok
 	_load_level(0)
+
+	# --- stars on goal levels come from moves left, not score
+	_load_level(1)
+	collected = int(LEVELS[1]["goal"]["count"])
+	moves_left = int(LEVELS[1]["moves"])
+	ok = _check("goal_stars_full_budget", _stars_earned(), 3) and ok
+	moves_left = 7
+	ok = _check("goal_stars_mid_budget", _stars_earned(), 2) and ok
+	moves_left = 1
+	ok = _check("goal_stars_last_move", _stars_earned(), 1) and ok
+	score = 999999
+	ok = _check("goal_stars_ignore_score", _stars_earned(), 1) and ok
+	_load_level(0)                                   # score level still scores
+	score = int(star_base * STAR_3)
+	moves_left = 1
+	ok = _check("score_stars_still_score", _stars_earned(), 3) and ok
+
+	# --- the free reshuffle costs no move and keeps score
+	_load_level(3)
+	await _settle()
+	var before_score: int = score
+	var before_moves: int = moves_left
+	ok = _check("shuffle_starts_at_one", shuffles_left, 1) and ok
+	await _use_shuffle()
+	ok = _check("shuffle_spent", shuffles_left, 0) and ok
+	ok = _check("shuffle_keeps_score", score, before_score) and ok
+	ok = _check("shuffle_keeps_moves", moves_left, before_moves) and ok
+	ok = _check("shuffle_board_playable", _has_legal_move(), true) and ok
+	ok = _check("shuffle_no_free_matches", _find_matches().size(), 0) and ok
+	await _use_shuffle()
+	ok = _check("shuffle_not_reusable", shuffles_left, 0) and ok
 
 	# --- goals
 	_load_level(1)                                   # collect level
@@ -2457,9 +2529,11 @@ func _selftest() -> void:
 	ok = _check("jelly_not_dragged", jelly[3][3], 0) and ok
 	ok = _check("jelly_count_intact", jelly_left, 1) and ok
 
-	# winning a non-score goal still banks a star even on a low score
+	# winning always banks at least one star, even on the very last move with
+	# nothing scored - the floor, not the full-budget case
 	_load_level(1)
 	collected = int(LEVELS[1]["goal"]["count"])
+	moves_left = 0
 	score = 10
 	best[1] = 0
 	_check_outcome()
