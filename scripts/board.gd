@@ -36,27 +36,12 @@ const JELLY_WIDE := [
 	"........",
 ]
 
-# Each level: a move budget, a goal that decides win/lose, and star_base - the
-# score the star ratings key off, so a collect or jelly level still rewards
-# playing well. Counts come from the balance harness, not guesswork.
-const LEVELS := [
-	{"moves": 22, "star_base": 1000,
-		"goal": {"kind": GOAL_SCORE, "score": 1000}},
-	{"moves": 22, "star_base": 1200,
-		"goal": {"kind": GOAL_COLLECT, "species": 0, "count": 16}},
-	{"moves": 20, "star_base": 1350,
-		"goal": {"kind": GOAL_SCORE, "score": 1350}},
-	{"moves": 20, "star_base": 1500,
-		"goal": {"kind": GOAL_JELLY, "layout": JELLY_CENTER}},
-	{"moves": 18, "star_base": 1650,
-		"goal": {"kind": GOAL_COLLECT, "species": 3, "count": 18}},
-	{"moves": 22, "star_base": 1700,
-		"goal": {"kind": GOAL_JELLY, "layout": JELLY_WIDE}},
-]
-# Score levels rate on score. Goal levels rate on efficiency instead: a
-# collect or jelly level ends the moment the goal is met, so score at that
-# instant barely moves and every clear scored exactly 1 star. Moves left is
-# both reachable and the thing skill actually controls.
+# Levels are generated from a curve rather than typed out, so the count is one
+# constant away from 10 or 100. _level_spec(n) derives a level from its index;
+# _build_levels() then applies hand-authored overrides on top, which always win.
+const LEVEL_COUNT := 30
+const CHAPTER := 10          # levels per chapter; the move budget resets here
+
 const STAR_2_MOVES := 0.25      # fraction of the move budget still unspent
 const STAR_3_MOVES := 0.45
 const STAR_2 := 1.3          # multiples of target
@@ -140,6 +125,7 @@ var goal: Dictionary = {}
 var star_base := 0
 var no_finish := false   # dev: balance harness plays every move
 var shuffles_left := 0
+var level_table: Array = []
 var fast := false          # dev: skip animation waits (balance harness)
 var won := false
 var moves_label: Label
@@ -173,6 +159,7 @@ func _ready() -> void:
 	frames_bomb = _build_bomb_frames()
 	_build_ui()
 	_build_audio()
+	_build_levels()
 	_load_progress()
 	_build_menu()
 	_build_select()
@@ -201,6 +188,8 @@ func _ready() -> void:
 		_shot_select()
 	elif args.has("shotjelly"):
 		_shot_jelly()
+	elif args.has("levels"):
+		_print_levels()
 
 
 func _atlas(tex: Texture2D, col: int, row: int) -> AtlasTexture:
@@ -628,12 +617,12 @@ func _build_select() -> void:
 	select_layer.add_child(scroll)
 
 	map_content = Control.new()
-	var last := _node_pos(LEVELS.size() - 1)
+	var last := _node_pos(level_table.size() - 1)
 	map_content.custom_minimum_size = Vector2(640, last.y + 110.0)
 	scroll.add_child(map_content)
 
 	# stepping-stone trail between the floes
-	for i in LEVELS.size() - 1:
+	for i in level_table.size() - 1:
 		var a := _node_pos(i)
 		var b := _node_pos(i + 1)
 		for k in range(1, 5):
@@ -641,7 +630,7 @@ func _build_select() -> void:
 			dot.position = a.lerp(b, k / 5.0)
 			map_content.add_child(dot)
 
-	for i in LEVELS.size():
+	for i in level_table.size():
 		var c := _node_pos(i)
 
 		# a chunk of ice, shaded like the bergs: dark rim, mid face, lit facet
@@ -666,7 +655,7 @@ func _build_select() -> void:
 		select_buttons.append(b)
 
 		var info := Label.new()
-		info.text = "%d MOVES   %s" % [LEVELS[i]["moves"], _level_summary(i)]
+		info.text = "%d MOVES   %s" % [level_table[i]["moves"], _level_summary(i)]
 		info.position = Vector2(c.x - 150.0, c.y + 60.0)
 		info.size = Vector2(300, 20)
 		info.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -688,7 +677,7 @@ func _build_select() -> void:
 
 
 func _refresh_select() -> void:
-	for i in LEVELS.size():
+	for i in level_table.size():
 		var unlocked: bool = i == 0 or int(best.get(i - 1, 0)) > 0
 		select_buttons[i].disabled = not unlocked
 		node_faces[i][0].color = Color("a7cde8") if unlocked else Color(0.40, 0.49, 0.58, 0.80)
@@ -701,7 +690,7 @@ func _refresh_select() -> void:
 
 
 func _level_summary(i: int) -> String:
-	var g: Dictionary = LEVELS[i]["goal"]
+	var g: Dictionary = level_table[i]["goal"]
 	match int(g["kind"]):
 		GOAL_COLLECT:
 			return "%dx %s" % [int(g["count"]), SPECIES_SHORT[int(g["species"])]]
@@ -717,7 +706,7 @@ func _level_summary(i: int) -> String:
 
 
 func _next_unplayed() -> int:
-	for i in LEVELS.size():
+	for i in level_table.size():
 		if int(best.get(i, 0)) == 0:
 			return i
 	return 0
@@ -830,7 +819,7 @@ func _update_score() -> void:
 	score_label.text = "score  %d" % score
 	moves_label.text = "moves  %d" % max(moves_left, 0)
 	target_label.text = _goal_text()
-	level_label.text = "LEVEL %d/%d" % [level + 1, LEVELS.size()]
+	level_label.text = "LEVEL %d/%d" % [level + 1, level_table.size()]
 	if keys_label != null:
 		keys_label.text = "S SHUFFLE (%d)     R RETRY     ESC LEVELS     M MUTE" % shuffles_left
 	var frac: float = clampf(float(_goal_done()) / float(maxi(_goal_total(), 1)), 0.0, 1.0)
@@ -1560,7 +1549,7 @@ func _goal_text() -> String:
 func _stars_earned() -> int:
 	if int(goal.get("kind", GOAL_SCORE)) == GOAL_SCORE:
 		return _stars_for(score)
-	var budget: float = float(LEVELS[level]["moves"])
+	var budget: float = float(level_table[level]["moves"])
 	var left: float = float(maxi(moves_left, 0)) / maxf(budget, 1.0)
 	if left >= STAR_3_MOVES:
 		return 3
@@ -1580,9 +1569,144 @@ func _stars_for(sc: int) -> int:
 	return 0
 
 
+func _jelly_pattern(shape: String, extent: float) -> Array:
+	"""Builds an 8-string jelly layout. Generated rather than typed so jelly
+	levels scale with the curve instead of needing a new hand-drawn layout."""
+	var rows: Array = []
+	for r in ROWS:
+		var line := ""
+		for c in COLS:
+			var dx: float = abs(c - (COLS - 1) / 2.0)
+			var dy: float = abs(r - (ROWS - 1) / 2.0)
+			var inside := false
+			match shape:
+				"block":
+					inside = dx <= extent and dy <= extent
+				"diamond":
+					inside = dx + dy <= extent * 1.4
+				"octagon":
+					inside = dx <= extent and dy <= extent and dx + dy <= extent * 1.55
+				"ring":
+					inside = max(dx, dy) <= extent and max(dx, dy) > extent - 1.5
+				"cross":
+					inside = (dx <= 1.0 or dy <= 1.0) and dx <= extent and dy <= extent
+				_:
+					inside = dx <= extent and dy <= extent
+			line += "1" if inside else "."
+		rows.append(line)
+	return rows
+
+
+func _layout_cells(rows: Array) -> int:
+	var n := 0
+	for line in rows:
+		for ch in line:
+			if ch == "1" or ch == "2":
+				n += int(ch)
+	return n
+
+
+func _level_spec(n: int) -> Dictionary:
+	"""Derives level n (1-based) from the difficulty curve.
+
+	Three dials move with n: the goal type cycles so no chapter repeats itself,
+	the magnitude climbs, and the move budget tapers across a chapter then
+	resets. The curve is a starting point - run `-- balance` and adjust the
+	coefficients rather than editing levels one by one.
+	"""
+	var idx: int = n - 1
+	var chapter: int = idx / CHAPTER
+	var step: int = idx % CHAPTER
+
+	# the opening eases players in with one species fewer
+	var species: int = 5 if n <= 3 else SPECIES
+
+	# budget tapers gently through a chapter, each chapter starting tighter
+	var moves: int = maxi(22 - step / 2 - chapter, 15)
+
+	# Magnitudes are derived from the move budget, not from n. The balance
+	# sweep fitted median score to roughly 75 * moves - 120, and a target at
+	# ~0.85x the median played as "challenging but fair", so pressure climbs
+	# from just under that and crosses it later on. Deriving from n alone gave
+	# a 4540 target on a 14-move level, which is unreachable.
+	var est_median: int = maxi(75 * moves - 120, 400)
+	# The hand-tuned levels sit near 0.95-1.0 of the estimated median, so the
+	# generated curve continues from there rather than restarting below them.
+	var pressure: float = 0.95 + 0.010 * idx
+
+	# one in four levels is a score level, the rest alternate collect and jelly
+	var kind: int = GOAL_SCORE
+	if step % 4 == 1:
+		kind = GOAL_COLLECT
+	elif step % 4 == 3:
+		kind = GOAL_JELLY
+
+	var spec := {"species": species, "moves": moves}
+	match kind:
+		GOAL_COLLECT:
+			# random play collects ~1 piece of a given species per move
+			var count: int = maxi(int(round(moves * 0.8 * pressure)), 10)
+			spec["star_base"] = int(round(est_median * pressure / 50.0) * 50)
+			spec["goal"] = {"kind": GOAL_COLLECT,
+					"species": idx % SPECIES, "count": count}
+		GOAL_JELLY:
+			# extent is capped: a 3.0 extent is 36 cells, far past what a
+			# 15-move budget can clear
+			var shapes := ["block", "octagon", "diamond", "cross", "ring"]
+			var shape: String = shapes[(idx / 4) % shapes.size()]
+			# Fit the extent to the budget rather than capping it. Shapes vary
+			# hugely in area at the same extent - a block at 2.75 is 36 cells
+			# where a cross is 12 - so pick the extent whose cell count lands
+			# closest to what the budget can clear. The sweep measured ~14 of
+			# 16 cleared in 20 moves, so target a little under one per move.
+			var want: int = maxi(int(round(moves * 0.9 * pressure)), 10)
+			var layout: Array = _jelly_pattern(shape, 2.0)
+			var best_gap: int = 9999
+			for tenths in range(40, 141, 5):            # extent 1.00 .. 3.50
+				var e: float = tenths / 40.0
+				var trial: Array = _jelly_pattern(shape, e)
+				var gap: int = absi(_layout_cells(trial) - want)
+				if gap < best_gap:
+					best_gap = gap
+					layout = trial
+			spec["star_base"] = int(round(est_median * pressure / 50.0) * 50)
+			spec["goal"] = {"kind": GOAL_JELLY, "layout": layout}
+		_:
+			var target: int = int(round(est_median * pressure / 50.0) * 50)
+			spec["star_base"] = target
+			spec["goal"] = {"kind": GOAL_SCORE, "score": target}
+	return spec
+
+
+func _override(n: int, spec: Dictionary) -> void:
+	if n >= 1 and n <= level_table.size():
+		level_table[n - 1] = spec
+
+
+func _build_levels() -> void:
+	level_table = []
+	for n in range(1, LEVEL_COUNT + 1):
+		level_table.append(_level_spec(n))
+	# The first six were balanced by hand and have been played, so they are
+	# pinned rather than regenerated - and they double as the worked example of
+	# how an override is written.
+	_override(1, {"species": 6, "moves": 22, "star_base": 1000,
+			"goal": {"kind": GOAL_SCORE, "score": 1000}})
+	_override(2, {"species": 6, "moves": 22, "star_base": 1200,
+			"goal": {"kind": GOAL_COLLECT, "species": 0, "count": 16}})
+	_override(3, {"species": 6, "moves": 20, "star_base": 1350,
+			"goal": {"kind": GOAL_SCORE, "score": 1350}})
+	_override(4, {"species": 6, "moves": 20, "star_base": 1500,
+			"goal": {"kind": GOAL_JELLY, "layout": JELLY_CENTER}})
+	_override(5, {"species": 6, "moves": 18, "star_base": 1650,
+			"goal": {"kind": GOAL_COLLECT, "species": 3, "count": 18}})
+	_override(6, {"species": 6, "moves": 22, "star_base": 1700,
+			"goal": {"kind": GOAL_JELLY, "layout": JELLY_WIDE}})
+
+
 func _load_level(i: int) -> void:
-	level = clampi(i, 0, LEVELS.size() - 1)
-	var cfg: Dictionary = LEVELS[level]
+	level = clampi(i, 0, level_table.size() - 1)
+	var cfg: Dictionary = level_table[level]
 	species_count = cfg.get("species", SPECIES)
 	moves_left = cfg["moves"]
 	star_base = cfg["star_base"]
@@ -1677,7 +1801,7 @@ func _finish(did_win: bool) -> void:
 	result_label.text = "LEVEL CLEARED!" if won else "OUT OF MOVES"
 	result_label.add_theme_color_override("font_color",
 		Color("9fe3ff") if won else Color("ff95bb"))
-	if won and level + 1 < LEVELS.size():
+	if won and level + 1 < level_table.size():
 		result_sub.text = "score %d          SPACE for level %d     R to replay" \
 			% [score, level + 2]
 	elif won:
@@ -1696,13 +1820,13 @@ func _finish(did_win: bool) -> void:
 func _load_progress() -> void:
 	var cf := ConfigFile.new()
 	var loaded: bool = cf.load(SAVE_PATH) == OK
-	for i in LEVELS.size():
+	for i in level_table.size():
 		best[i] = int(cf.get_value("stars", str(i), 0)) if loaded else 0
 
 
 func _save_progress() -> void:
 	var cf := ConfigFile.new()
-	for i in LEVELS.size():
+	for i in level_table.size():
 		cf.set_value("stars", str(i), int(best.get(i, 0)))
 	cf.save(SAVE_PATH)
 
@@ -1872,7 +1996,7 @@ func _restart() -> void:
 
 
 func _next_level() -> void:
-	if level + 1 >= LEVELS.size():
+	if level + 1 >= level_table.size():
 		_goto(ST_SELECT)
 		return
 	busy = true
@@ -1965,14 +2089,25 @@ func _shot_win() -> void:
 	get_tree().quit()
 
 
+func _print_levels() -> void:
+	# dev: see the whole generated curve at a glance, for tuning
+	print("  n  sp  mv  star   goal")
+	for i in level_table.size():
+		var cfg: Dictionary = level_table[i]
+		print("%3d  %2d  %2d  %5d   %s%s" % [i + 1, int(cfg.get("species", SPECIES)),
+				int(cfg["moves"]), int(cfg["star_base"]), _level_summary(i),
+				"   (override)" if i < 6 else ""])
+	get_tree().quit()
+
+
 func _balance() -> void:
 	# Play random legal moves with animation skipped, to see what each level's
 	# move budget actually yields. The target is then set from the mean.
 	await _start_level(0)
 	fast = true
 	no_finish = true
-	for i in LEVELS.size():
-		var cfg: Dictionary = LEVELS[i]
+	for i in level_table.size():
+		var cfg: Dictionary = level_table[i]
 		var runs: Array = []
 		var goals: Array = []
 		for trial in 30:
@@ -2310,7 +2445,7 @@ func _selftest() -> void:
 	var node_bottom: float = last_node.position.y + last_node.size.y + 60.0  # stars + info
 	ok = _check("map_holds_every_level",
 			node_bottom <= map_content.custom_minimum_size.y, true) and ok
-	ok = _check("map_node_count", select_buttons.size(), LEVELS.size()) and ok
+	ok = _check("map_node_count", select_buttons.size(), level_table.size()) and ok
 	ok = _check("map_scrolls", map_content.custom_minimum_size.y > 0.0, true) and ok
 	# the top slice must line up with the board origin or the seam shows
 	var slice: AtlasTexture = bg_front.texture
@@ -2395,7 +2530,7 @@ func _selftest() -> void:
 
 	# a collect goal still ends the moment it is met
 	_load_level(1)
-	collected = int(LEVELS[1]["goal"]["count"])
+	collected = int(level_table[1]["goal"]["count"])
 	moves_left = 5
 	_check_outcome()
 	ok = _check("collect_goal_ends_early", game_over and won, true) and ok
@@ -2422,13 +2557,13 @@ func _selftest() -> void:
 	score = 999
 	moves_left = 0
 	await _restart()
-	ok = _check("restart_moves", moves_left, LEVELS[level]["moves"]) and ok
+	ok = _check("restart_moves", moves_left, level_table[level]["moves"]) and ok
 	ok = _check("restart_live", game_over, false) and ok
 
 	# --- levels and stars
 	_load_level(2)
-	ok = _check("level_load_moves", moves_left, LEVELS[2]["moves"]) and ok
-	ok = _check("level_load_target", target, int(LEVELS[2]["goal"]["score"])) and ok
+	ok = _check("level_load_moves", moves_left, level_table[2]["moves"]) and ok
+	ok = _check("level_load_target", target, int(level_table[2]["goal"]["score"])) and ok
 	ok = _check("level_load_score", score, 0) and ok
 
 	star_base = 1000
@@ -2439,7 +2574,7 @@ func _selftest() -> void:
 
 	# clearing a level banks the best star count and persists it
 	_load_level(1)                                   # collect level: moves rate it
-	collected = int(LEVELS[1]["goal"]["count"])
+	collected = int(level_table[1]["goal"]["count"])
 	moves_left = 7                                   # 7/22 = 0.32 -> two stars
 	_check_outcome()
 	ok = _check("win_banks_stars", int(best.get(1, 0)), 2) and ok
@@ -2449,20 +2584,20 @@ func _selftest() -> void:
 
 	# a lower score must not lower the banked stars
 	_load_level(1)
-	collected = int(LEVELS[1]["goal"]["count"])
+	collected = int(level_table[1]["goal"]["count"])
 	moves_left = 1                                   # 1/22 -> one star only
 	_check_outcome()
 	ok = _check("best_not_lowered", int(best.get(1, 0)), 2) and ok
 
 	await _next_level()
 	ok = _check("next_level", level, 2) and ok
-	ok = _check("next_level_target", target, int(LEVELS[2]["goal"]["score"])) and ok
+	ok = _check("next_level_target", target, int(level_table[2]["goal"]["score"])) and ok
 	_load_level(0)
 
 	# --- stars on goal levels come from moves left, not score
 	_load_level(1)
-	collected = int(LEVELS[1]["goal"]["count"])
-	moves_left = int(LEVELS[1]["moves"])
+	collected = int(level_table[1]["goal"]["count"])
+	moves_left = int(level_table[1]["moves"])
 	ok = _check("goal_stars_full_budget", _stars_earned(), 3) and ok
 	moves_left = 7
 	ok = _check("goal_stars_mid_budget", _stars_earned(), 2) and ok
@@ -2492,14 +2627,14 @@ func _selftest() -> void:
 
 	# --- goals
 	_load_level(1)                                   # collect level
-	ok = _check("goal_collect_total", _goal_total(), int(LEVELS[1]["goal"]["count"])) and ok
+	ok = _check("goal_collect_total", _goal_total(), int(level_table[1]["goal"]["count"])) and ok
 	ok = _check("goal_collect_start", _goal_done(), 0) and ok
-	collected = int(LEVELS[1]["goal"]["count"])
+	collected = int(level_table[1]["goal"]["count"])
 	ok = _check("goal_collect_met", _goal_met(), true) and ok
 
 	_load_level(3)                                   # jelly level
 	var jelly_expected := 0
-	for line in LEVELS[3]["goal"]["layout"]:
+	for line in level_table[3]["goal"]["layout"]:
 		for ch in line:
 			if ch == "1" or ch == "2":
 				jelly_expected += int(ch)
@@ -2532,7 +2667,7 @@ func _selftest() -> void:
 	# winning always banks at least one star, even on the very last move with
 	# nothing scored - the floor, not the full-budget case
 	_load_level(1)
-	collected = int(LEVELS[1]["goal"]["count"])
+	collected = int(level_table[1]["goal"]["count"])
 	moves_left = 0
 	score = 10
 	best[1] = 0
@@ -2546,7 +2681,7 @@ func _selftest() -> void:
 	score = 99999
 	_check_outcome()
 	ok = _check("lose_on_unmet_goal", won, false) and ok
-	for i in LEVELS.size():
+	for i in level_table.size():
 		best[i] = 0
 	_save_progress()
 	_load_level(0)
@@ -2560,7 +2695,7 @@ func _selftest() -> void:
 	ok = _check("play_level", level, 1) and ok
 
 	# unlock gating: a level opens once the one before it has a star
-	for i in LEVELS.size():
+	for i in level_table.size():
 		best[i] = 0
 	_refresh_select()
 	ok = _check("lock_first_open", select_buttons[0].disabled, false) and ok
@@ -2573,7 +2708,7 @@ func _selftest() -> void:
 	ok = _check("next_unplayed_first", _next_unplayed(), 1) and ok
 	best[1] = 3
 	ok = _check("next_unplayed_skips", _next_unplayed(), 2) and ok
-	for i in LEVELS.size():
+	for i in level_table.size():
 		best[i] = 0
 	_save_progress()
 	_goto(ST_MENU)

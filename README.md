@@ -118,20 +118,45 @@ Three screens, toggled by node layer (`menu_layer`, `select_layer`,
 
 ## Levels and goals
 
-Six levels. Each has a move budget, a **goal** that decides win/lose, and a
-`star_base` score that the star rating keys off - so a collect or jelly level
-still rewards playing well rather than just finishing.
+Levels are **generated from a curve**, not typed out. `LEVEL_COUNT` is the only
+thing standing between 30 levels and 300.
 
-| Level | Moves | Goal | star_base |
-|---|---|---|---|
-| 1 | 22 | score 1000 | 1000 |
-| 2 | 22 | collect 16 seals | 1200 |
-| 3 | 20 | score 1350 | 1350 |
-| 4 | 20 | clear 16 jelly | 1500 |
-| 5 | 18 | collect 18 walruses | 1650 |
-| 6 | 22 | clear 28 jelly | 1700 |
+`_level_spec(n)` derives level n from its index. Three dials move with n: the
+goal type cycles so no chapter repeats itself, the move budget tapers across a
+chapter and resets at the next, and the magnitude is derived **from the move
+budget**, not from n.
 
-Goal kinds:
+That last point is the one that matters. Deriving magnitude from n alone
+produced a 4540-point target on a 14-move level - unreachable, since the
+balance sweep fitted median score to roughly `75 * moves - 120`. Targets are
+now `est_median * pressure`, where pressure climbs from 0.95 to about 1.25
+across 30 levels. The hand-tuned levels sit near 0.95-1.0, so the generated
+curve continues from them rather than restarting below.
+
+Jelly layouts are generated too, from shape functions (block, octagon, diamond,
+cross, ring) rather than hand-drawn strings. **The extent is fitted to the
+budget**, because shapes vary hugely in area at the same extent - a block at
+2.75 is 36 cells where a cross is 12 - so the extent whose cell count lands
+closest to what the budget can clear is chosen. A first pass that only capped
+from above gave 12-cell jelly levels on 20 moves, which is trivial.
+
+`_build_levels()` applies **hand-authored overrides** last, so they always win.
+Levels 1-6 are pinned: they were balanced against measured medians and have
+been played, and they double as the worked example of how to write an override.
+
+    godot4 --headless --path . -- levels     # print the whole curve
+
+One known characteristic: absolute targets **sawtooth** rather than climbing
+monotonically, because they track the move budget, which falls through a
+chapter and resets. Difficulty still climbs, via pressure - a lower target on a
+tighter budget is harder - but the numbers on the map do not read as a straight
+line. Smoothing it would mean a budget that only ever shrinks.
+
+This curve is a starting point. It has not had a full balance sweep; the
+magnitudes come from fitting the earlier measurements rather than from
+measuring the generated levels themselves.
+
+Goal kinds:Goal kinds:
 
 - **score** - reach a score. The original behaviour.
 - **collect** - clear N pieces of one species. Counted in `_resolve` just
