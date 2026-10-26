@@ -36,9 +36,19 @@ test asserts that slice height matches `ORIGIN.y`.
 ### Legend
 
 The play screen's help was one run-on line of text, which did not scan. It is
-now a legend of **icon + label chips** built from the real piece art - striped,
-wrapped, bomb - with the key bindings on a second line beneath. The chips use
-the same treatment as the level-select rows, so the two screens match.
+now a legend of **icon + label pairs** built from the real piece art - striped,
+wrapped, bomb - with the key bindings on a second line beneath.
+
+The labels name the *match*, not the piece: "MATCH 4", "L OR T SHAPE",
+"MATCH 5". The middle one is spelled out because the wrapped piece is the only
+special defined by shape rather than run length - a horizontal and a vertical
+run sharing a piece - and a two-word label did not convey that.
+
+Both the legend and the level-select rows briefly had boxes behind them for
+contrast. They were dropped: the legend sits on the bottom vignette, and the
+select screen now uses `bg_play.png`, whose dark pool gives the list uniform
+contrast and frames it with the ice edge. Boxes for contrast are a sign the
+background is wrong underneath.
 
 Icons stay at 1x. A 1.5x pass made the markings clearer but any fractional
 scale breaks the pixel grid, doubling some rows of pixels and not others.
@@ -89,7 +99,8 @@ Three screens, toggled by node layer (`menu_layer`, `select_layer`,
 - **Menu** - title over the aurora, the six critters idling on an ice shelf,
   PLAY / LEVELS / QUIT. PLAY jumps to the first level with no stars yet.
 - **Level select** - one row per level with its move budget, goal summary and
-  earned stars. A level unlocks once the one before it has at least one star.
+  earned stars, laid over the play scene's pool. A level unlocks once the one
+  before it has at least one star.
 - **Play** - the board.
 
 `ESC` steps back one screen and only quits from the menu. `M` mutes anywhere.

@@ -564,15 +564,6 @@ func _build_select() -> void:
 	for i in LEVELS.size():
 		var y := 170.0 + i * 76.0
 
-		# a card behind each row: the scene is busy and pale in places, and the
-		# row text was unreadable where it crossed the ice shelf and snow bank
-		var card := ColorRect.new()
-		card.position = Vector2(84, y - 5)
-		card.size = Vector2(486, 62)
-		card.color = Color(0.04, 0.10, 0.19, 0.66)
-		card.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		select_layer.add_child(card)
-
 		var b := _button("LEVEL %d" % (i + 1), Vector2(92, y), Vector2(148, 52), 21)
 		b.pressed.connect(_start_level.bind(i))
 		select_layer.add_child(b)
@@ -590,13 +581,6 @@ func _build_select() -> void:
 			select_layer.add_child(tr)
 			row.append(tr)
 		select_stars.append(row)
-
-	var back_card := ColorRect.new()
-	back_card.position = Vector2(246, 606)
-	back_card.size = Vector2(148, 54)
-	back_card.color = Color(0.04, 0.10, 0.19, 0.66)
-	back_card.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	select_layer.add_child(back_card)
 
 	var back := _button("BACK", Vector2(250, 610), Vector2(140, 46), 21)
 	back.pressed.connect(func(): _goto(ST_MENU))
@@ -646,7 +630,7 @@ func _goto(s: int) -> void:
 	board_layer.visible = s == ST_PLAY
 	jelly_layer.visible = s == ST_PLAY
 	bg_front.visible = s == ST_PLAY
-	bg_back.texture = bg_play_tex if s == ST_PLAY else bg_menu_tex
+	bg_back.texture = bg_menu_tex if s == ST_MENU else bg_play_tex
 	hud_layer.visible = s == ST_PLAY
 	if s != ST_PLAY:
 		_hide_result()
@@ -666,18 +650,17 @@ func _start_level(i: int) -> void:
 
 
 func _build_legend() -> void:
-	# Icon + label pairs on chips rather than one run-on line: grouped by
-	# meaning, and the chips match the level-select cards. Icons stay at 1x -
-	# any fractional scale breaks the pixel grid.
+	# Icon + label pairs rather than one run-on line, grouped by meaning, with
+	# the key bindings on their own row beneath. Icons stay at 1x - any
+	# fractional scale breaks the pixel grid.
 	var entries := [
 		["MATCH 4", sp_tex, 0],     # striped
-		["L OR T", sp_tex, 8],      # wrapped
+		["L OR T SHAPE", sp_tex, 8],   # wrapped
 		["MATCH 5", bomb_tex, 0],   # colour bomb
 	]
 	var icon := 32.0
 	var inner := 6.0        # label to icon
-	var chip_pad := 10.0
-	var gap := 14.0
+	var gap := 34.0         # between groups, now that there are no chips
 	var widths: Array = []
 	var total := -gap
 	for e in entries:
@@ -685,21 +668,13 @@ func _build_legend() -> void:
 		if ui_font != null:
 			w = ui_font.get_string_size(e[0], HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
 		widths.append(w)
-		total += w + inner + icon + chip_pad * 2.0 + gap
+		total += w + inner + icon + gap
 	var x: float = (640.0 - total) * 0.5
 	for i in entries.size():
-		var cw: float = widths[i] + inner + icon + chip_pad * 2.0
-		var chip := ColorRect.new()
-		chip.position = Vector2(x, 678)
-		chip.size = Vector2(cw, 38)
-		chip.color = Color(0.04, 0.10, 0.19, 0.58)
-		chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		chip.z_index = 6
-		hud_layer.add_child(chip)
-
+		var cw: float = widths[i] + inner + icon
 		var lab := Label.new()
 		lab.text = entries[i][0]
-		lab.position = Vector2(x + chip_pad, 688)
+		lab.position = Vector2(x, 688)
 		_font(lab, 14, Color(0.90, 0.95, 1.0, 0.96))
 		lab.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		lab.z_index = 7
@@ -710,7 +685,7 @@ func _build_legend() -> void:
 		at.region = Rect2(entries[i][2] * 32, 0, 32, 32)
 		var ic := TextureRect.new()
 		ic.texture = at
-		ic.position = Vector2(x + chip_pad + widths[i] + inner, 681)
+		ic.position = Vector2(x + widths[i] + inner, 681)
 		ic.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 		ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		ic.z_index = 7
