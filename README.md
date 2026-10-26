@@ -109,9 +109,10 @@ Three screens, toggled by node layer (`menu_layer`, `select_layer`,
 
 - **Menu** - title over the aurora, the six critters idling on an ice shelf,
   PLAY / LEVELS / QUIT. PLAY jumps to the first level with no stars yet.
-- **Level select** - one row per level with its move budget, goal summary and
-  earned stars, laid over the play scene's pool. A level unlocks once the one
-  before it has at least one star.
+- **Level select** - a scrolling map of ice floes with each level's move
+  budget, goal summary and earned stars, laid over its own pool scene. A level
+  unlocks once the one before it has at least one star *and* its chapter's star
+  gate is paid.
 - **Play** - the board.
 
 `ESC` steps back one screen and only quits from the menu. `M` mutes anywhere.
@@ -232,6 +233,26 @@ Controls.
 
 Winning always banks at least one star, so a level cleared on a thin score is
 still a clear.
+
+### Star gates
+
+Stars are the currency of progression, not just a score. A ridge of ice sits on
+the map at every chapter boundary, captioned with its toll; crossing it needs
+`CHAPTER_GATE` (1.3) stars per level in the chapters behind it - 13 to enter
+chapter 2, 26 for chapter 3. Below the toll the ridge stands and the levels
+past it stay grey; once paid it sinks away and the caption dims to the chapter
+name.
+
+That makes a 1-star clear worth replaying for a 2-star, which multiplies the
+content without adding any. The toll is deliberately well under what a chapter
+can yield (13 of a possible 30), and `gate_always_payable` fails the build if a
+gate ever asks for more stars than the levels before it can give - an unpayable
+gate would end the game with no way forward.
+
+`_is_unlocked(i)` is the one place both rules live, so the map, PLAY and the
+end-of-level advance cannot disagree about what is reachable: winning the last
+level of a chapter without the stars for the next drops back to the map, where
+the toll is on screen.
 
 ### Tuning
 

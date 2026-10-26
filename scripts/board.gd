@@ -41,6 +41,10 @@ const JELLY_WIDE := [
 # _build_levels() then applies hand-authored overrides on top, which always win.
 const LEVEL_COUNT := 30
 const CHAPTER := 10          # levels per chapter; the move budget resets here
+# Total stars needed to enter each chapter. Winning always banks at least one
+# star, so finishing a chapter guarantees CHAPTER stars - the gate asks for a
+# 1.3 average, which means a few 2 and 3 star finishes rather than a grind.
+const CHAPTER_GATE := 1.3
 
 const STAR_2_MOVES := 0.25      # fraction of the move budget still unspent
 const STAR_3_MOVES := 0.45
@@ -115,9 +119,12 @@ var state := ST_MENU
 var select_buttons: Array = []
 var select_stars: Array = []
 var select_back: Button
+var select_total: Control
 var map_content: Control
+var map_scroll: ScrollContainer
 var node_faces: Array = []
 var node_numbers: Array = []
+var gate_marks: Array = []   # one per chapter boundary: {chapter, text, floes}
 var jelly: Array = []          # jelly[r][c] layers left on that cell, 0 = none
 var jelly_left := 0
 var collected := 0             # pieces of the goal species cleared this level
@@ -188,6 +195,8 @@ func _ready() -> void:
 		_shot_win()
 	elif args.has("shotmenu"):
 		_shot_menu()
+	elif args.has("shotgate"):
+		_shot_gate()
 	elif args.has("shotselect"):
 		_shot_select()
 	elif args.has("shotjelly"):
@@ -457,6 +466,12 @@ func _button(text: String, pos: Vector2, size: Vector2, font_size: int = 22) -> 
 	return b
 
 
+func _retext(ctrl: Control, text: String) -> void:
+	for ch in ctrl.get_children():
+		if ch is Label:
+			ch.text = text
+
+
 func _outlined(text: String, pos: Vector2, size: Vector2, font_size: int,
 		col: Color, outline: bool = true) -> Control:
 	# Godot ignores outline_size for bitmap fonts - it builds outlines from
@@ -607,8 +622,10 @@ func _floe(r: float, col: Color, seed_i: int, offset := Vector2.ZERO) -> Polygon
 
 
 func _node_pos(i: int) -> Vector2:
-	# a winding trail: the path is generated, so it extends to any level count
-	return Vector2(320.0 + 150.0 * sin(i * 0.95), 54.0 + i * 118.0)
+	# A winding trail: the path is generated, so it extends to any level count.
+	# Each chapter boundary opens an extra gap for the star gate to stand in.
+	return Vector2(320.0 + 150.0 * sin(i * 0.95),
+			54.0 + i * 118.0 + float(i / CHAPTER) * 110.0)
 
 
 func _build_select() -> void:
@@ -622,6 +639,7 @@ func _build_select() -> void:
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	select_layer.add_child(scroll)
 
+	map_scroll = scroll
 	map_content = Control.new()
 	var last := _node_pos(level_table.size() - 1)
 	map_content.custom_minimum_size = Vector2(640, last.y + 110.0)
@@ -631,6 +649,9 @@ func _build_select() -> void:
 	for i in level_table.size() - 1:
 		var a := _node_pos(i)
 		var b := _node_pos(i + 1)
+		if (i + 1) % CHAPTER == 0:
+			_build_gate((i + 1) / CHAPTER, (a.y + b.y) * 0.5)
+			continue        # a star gate stands here, not stepping stones
 		for k in range(1, 5):
 			var dot := _disc(4.0, Color(0.82, 0.92, 0.99, 0.72), 8)
 			dot.position = a.lerp(b, k / 5.0)
@@ -677,14 +698,56 @@ func _build_select() -> void:
 			row.append(tr)
 		select_stars.append(row)
 
+	select_total = _outlined("", Vector2(16, 706), Vector2(220, 26), 17,
+			Color("d8f1ff"))
+	select_layer.add_child(select_total)
+
 	select_back = _button("BACK", Vector2(250, 700), Vector2(140, 46), 21)
 	select_back.pressed.connect(func(): _goto(ST_MENU))
 	select_layer.add_child(select_back)
 
 
+func _build_gate(chapter: int, y: float) -> void:
+	"""A ridge of ice across the channel where one chapter ends and the next
+	begins, captioned with the star toll. _refresh_select fills in the text."""
+	var floes: Array = []
+	for k in 6:
+		var x: float = 140.0 + k * 76.0
+		var rim := _floe(26.0, Color(0.05, 0.12, 0.21, 0.70), chapter * 31 + k,
+				Vector2(x, y))
+		rim.scale = Vector2(1.0, 0.42)
+		map_content.add_child(rim)
+		var face := _floe(22.0, Color("9dc4e0"), chapter * 31 + k, Vector2(x, y - 2))
+		face.scale = Vector2(1.0, 0.42)
+		map_content.add_child(face)
+		floes.append([rim, face])
+
+	var cap := _outlined("", Vector2(120, y + 14.0), Vector2(400, 34), 20,
+			Color("f4fbff"))
+	map_content.add_child(cap)
+	gate_marks.append({"chapter": chapter, "cap": cap, "floes": floes})
+
+
 func _refresh_select() -> void:
+	var total: int = _total_stars()
+	_retext(select_total, "%d OF %d STARS" % [total, level_table.size() * 3])
+	for g in gate_marks:
+		var need: int = _chapter_gate(int(g["chapter"]))
+		var open_gate: bool = total >= need
+		if open_gate:
+			_retext(g["cap"], "CHAPTER %d" % (int(g["chapter"]) + 1))
+		else:
+			_retext(g["cap"], "CHAPTER %d  %d OF %d STARS"
+					% [int(g["chapter"]) + 1, total, need])
+		g["cap"].modulate.a = 0.55 if open_gate else 1.0
+		for pair in g["floes"]:
+			# the ridge sinks away once the toll is paid
+			pair[0].color = Color(0.05, 0.12, 0.21, 0.18 if open_gate else 0.70)
+			pair[1].color = Color("9dc4e0") if not open_gate \
+					else Color(0.70, 0.84, 0.93, 0.25)
+
 	for i in level_table.size():
-		var unlocked: bool = i == 0 or int(best.get(i - 1, 0)) > 0
+		var unlocked: bool = _is_unlocked(i)
 		select_buttons[i].disabled = not unlocked
 		node_faces[i][0].color = Color("a7cde8") if unlocked else Color(0.40, 0.49, 0.58, 0.80)
 		node_faces[i][1].color = Color("e6f4ff") if unlocked else Color(0.52, 0.60, 0.68, 0.80)
@@ -711,9 +774,31 @@ func _level_summary(i: int) -> String:
 			return "%d PTS" % int(g["score"])
 
 
+func _total_stars() -> int:
+	var n := 0
+	for i in level_table.size():
+		n += int(best.get(i, 0))
+	return n
+
+
+func _chapter_gate(ch: int) -> int:
+	return int(round(ch * CHAPTER * CHAPTER_GATE))
+
+
+func _is_unlocked(i: int) -> bool:
+	"""Two rules at once: the previous level must have a star, and the
+	chapter's star gate must be met. Centralised so the map, PLAY and the
+	end-of-level advance cannot disagree about what is reachable."""
+	if i <= 0:
+		return true
+	if int(best.get(i - 1, 0)) <= 0:
+		return false
+	return _total_stars() >= _chapter_gate(i / CHAPTER)
+
+
 func _next_unplayed() -> int:
 	for i in level_table.size():
-		if int(best.get(i, 0)) == 0:
+		if int(best.get(i, 0)) == 0 and _is_unlocked(i):
 			return i
 	return 0
 
@@ -2131,8 +2216,8 @@ func _restart() -> void:
 
 
 func _next_level() -> void:
-	if level + 1 >= level_table.size():
-		_goto(ST_SELECT)
+	if level + 1 >= level_table.size() or not _is_unlocked(level + 1):
+		_goto(ST_SELECT)      # gated, or there is nothing after this
 		return
 	busy = true
 	_load_level(level + 1)
@@ -2215,6 +2300,24 @@ func _shot_select() -> void:
 	_goto(ST_SELECT)
 	await get_tree().create_timer(0.4).timeout
 	await _save_shot("user://shot_select.png")
+	music.stop()
+	get_tree().quit()
+
+
+func _shot_gate() -> void:
+	# dev: the first star gate, half paid, with the chapter boundary in frame
+	for i in CHAPTER:
+		best[i] = 1
+	_goto(ST_SELECT)
+	await get_tree().create_timer(0.4).timeout
+	map_scroll.scroll_vertical = int(gate_marks[0]["cap"].position.y - 190.0)
+	await get_tree().create_timer(0.3).timeout
+	await _save_shot("user://shot_gate.png")
+	for i in CHAPTER:
+		best[i] = 2                                  # and again with it paid
+	_refresh_select()
+	await get_tree().create_timer(0.3).timeout
+	await _save_shot("user://shot_gate_open.png")
 	music.stop()
 	get_tree().quit()
 
@@ -2841,6 +2944,39 @@ func _selftest() -> void:
 	ok = _check("shuffle_no_free_matches", _find_matches().size(), 0) and ok
 	await _use_shuffle()
 	ok = _check("shuffle_not_reusable", shuffles_left, 0) and ok
+
+	# --- star gates: chapters open on the running star total
+	var saved_best: Dictionary = best.duplicate()
+	best = {}
+	ok = _check("gate_chapter_one_free", _is_unlocked(0), true) and ok
+	for i in CHAPTER:
+		best[i] = 1                                  # cleared, barely: 10 stars
+	ok = _check("gate_prev_level_still_counts", _is_unlocked(CHAPTER - 1), true) and ok
+	ok = _check("gate_blocks_chapter_two", _is_unlocked(CHAPTER), false) and ok
+	ok = _check("gate_skips_gated_level",
+			_next_unplayed() < CHAPTER, true) and ok
+	_refresh_select()
+	var cap: Label = gate_marks[0]["cap"].get_child(0)
+	ok = _check("gate_shows_toll", cap.text.contains("OF"), true) and ok
+	for i in CHAPTER:
+		best[i] = 2                                  # 20 stars clears the toll
+	ok = _check("gate_opens_on_stars", _is_unlocked(CHAPTER), true) and ok
+	_refresh_select()
+	cap = gate_marks[0]["cap"].get_child(0)
+	ok = _check("gate_hides_toll_when_open", cap.text.contains("OF"), false) and ok
+	best = {0: 3}                                    # stars do not skip levels
+	ok = _check("gate_needs_the_level_before", _is_unlocked(2), false) and ok
+	# A gate nobody can pay would end the game. Measure, do not assume.
+	var reachable := true
+	for g in gate_marks:
+		var ch: int = int(g["chapter"])
+		if _chapter_gate(ch) > ch * CHAPTER * 3:
+			reachable = false
+	ok = _check("gate_always_payable", reachable, true) and ok
+	ok = _check("gate_marks_every_boundary", gate_marks.size(),
+			(level_table.size() - 1) / CHAPTER) and ok
+	best = saved_best
+	_refresh_select()
 
 	# --- goals
 	_load_level(1)                                   # collect level
