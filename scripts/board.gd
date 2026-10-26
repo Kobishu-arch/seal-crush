@@ -45,6 +45,14 @@ const CHAPTER := 10          # levels per chapter; the move budget resets here
 # star, so finishing a chapter guarantees CHAPTER stars - the gate asks for a
 # 1.3 average, which means a few 2 and 3 star finishes rather than a grind.
 const CHAPTER_GATE := 1.3
+# Boosters, paid for in stars. Gates read the LIFETIME star total and boosters
+# a spendable wallet, so buying one can never re-lock a chapter you opened.
+const BOOST_SHUFFLE := 0
+const BOOST_MOVES := 1
+const BOOST_HAMMER := 2
+const BOOST_NAMES := ["SHUFFLE", "+5 MOVES", "HAMMER"]
+const BOOST_COST := [1, 3, 2]
+const BOOST_MOVES_GIVEN := 5
 
 const STAR_2_MOVES := 0.25      # fraction of the move budget still unspent
 const STAR_3_MOVES := 0.45
@@ -120,6 +128,7 @@ var select_buttons: Array = []
 var select_stars: Array = []
 var select_back: Button
 var select_total: Control
+var select_purse: Control
 var map_content: Control
 var map_scroll: ScrollContainer
 var node_faces: Array = []
@@ -132,6 +141,9 @@ var goal: Dictionary = {}
 var star_base := 0
 var no_finish := false   # dev: balance harness plays every move
 var shuffles_left := 0
+var spent_stars := 0           # stars paid out for boosters; never un-earns one
+var hammer_armed := false
+var boost_buttons: Array = []
 var level_table: Array = []
 var board_shape: Array = []  # per-level outline, '#' marks a hole
 var blocked: Array = []      # blocked[r][c]: a hole in the board
@@ -195,6 +207,8 @@ func _ready() -> void:
 		_shot_win()
 	elif args.has("shotmenu"):
 		_shot_menu()
+	elif args.has("shotboost"):
+		_shot_boost()
 	elif args.has("shotgate"):
 		_shot_gate()
 	elif args.has("shotselect"):
@@ -698,9 +712,12 @@ func _build_select() -> void:
 			row.append(tr)
 		select_stars.append(row)
 
-	select_total = _outlined("", Vector2(16, 706), Vector2(220, 26), 17,
+	select_total = _outlined("", Vector2(16, 692), Vector2(220, 26), 17,
 			Color("d8f1ff"))
 	select_layer.add_child(select_total)
+	select_purse = _outlined("", Vector2(16, 716), Vector2(220, 26), 17,
+			Color("ffdd88"))
+	select_layer.add_child(select_purse)
 
 	select_back = _button("BACK", Vector2(250, 700), Vector2(140, 46), 21)
 	select_back.pressed.connect(func(): _goto(ST_MENU))
@@ -731,6 +748,7 @@ func _build_gate(chapter: int, y: float) -> void:
 func _refresh_select() -> void:
 	var total: int = _total_stars()
 	_retext(select_total, "%d OF %d STARS" % [total, level_table.size() * 3])
+	_retext(select_purse, "%d TO SPEND" % _stars_available())
 	for g in gate_marks:
 		var need: int = _chapter_gate(int(g["chapter"]))
 		var open_gate: bool = total >= need
@@ -779,6 +797,20 @@ func _total_stars() -> int:
 	for i in level_table.size():
 		n += int(best.get(i, 0))
 	return n
+
+
+func _stars_available() -> int:
+	return maxi(_total_stars() - spent_stars, 0)
+
+
+func _spend_stars(n: int) -> bool:
+	if n <= 0:
+		return true
+	if _stars_available() < n:
+		return false
+	spent_stars += n
+	_save_progress()
+	return true
 
 
 func _chapter_gate(ch: int) -> int:
@@ -860,7 +892,7 @@ func _build_legend() -> void:
 		var cw: float = widths[i] + inner + icon
 		var lab := Label.new()
 		lab.text = entries[i][0]
-		lab.position = Vector2(x, 688)
+		lab.position = Vector2(x, 683)
 		_font(lab, 14, Color(0.90, 0.95, 1.0, 0.96))
 		lab.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		lab.z_index = 7
@@ -871,20 +903,31 @@ func _build_legend() -> void:
 		at.region = Rect2(entries[i][2] * 32, 0, 32, 32)
 		var ic := TextureRect.new()
 		ic.texture = at
-		ic.position = Vector2(x + widths[i] + inner, 681)
+		ic.position = Vector2(x + widths[i] + inner, 676)
 		ic.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 		ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		ic.z_index = 7
 		hud_layer.add_child(ic)
 		x += cw + gap
 
+	# Boosters: the only sink for stars, and the only way to reach the free
+	# reshuffle - it was advertised on the key line but never bound to a key.
+	var bw := 170.0
+	var bx: float = (640.0 - (bw * 3.0 + 32.0)) * 0.5
+	for i in 3:
+		var bb := _button("", Vector2(bx + i * (bw + 16.0), 710), Vector2(bw, 30), 14)
+		bb.z_index = 7
+		bb.pressed.connect(_use_boost.bind(i))
+		hud_layer.add_child(bb)
+		boost_buttons.append(bb)
+
 	keys_label = Label.new()
 	var keys := keys_label
 	keys.text = "R RETRY     ESC LEVELS     M MUTE"
-	keys.position = Vector2(0, 728)
+	keys.position = Vector2(0, 742)
 	keys.size = Vector2(640, 20)
 	keys.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_font(keys, 14, Color(0.72, 0.84, 0.96, 0.88))
+	_font(keys, 12, Color(0.72, 0.84, 0.96, 0.88))
 	keys.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	keys.z_index = 6
 	hud_layer.add_child(keys)
@@ -921,7 +964,9 @@ func _update_score() -> void:
 	target_label.text = _goal_text()
 	level_label.text = "LEVEL %d/%d" % [level + 1, level_table.size()]
 	if keys_label != null:
-		keys_label.text = "S SHUFFLE (%d)     R RETRY     ESC LEVELS     M MUTE" % shuffles_left
+		keys_label.text = "STARS %d     R RETRY     ESC LEVELS     M MUTE" \
+				% _stars_available()
+	_refresh_boosters()
 	var frac: float = clampf(float(_goal_done()) / float(maxi(_goal_total(), 1)), 0.0, 1.0)
 	bar_fill.size = Vector2(512.0 * frac, 6)
 
@@ -1301,6 +1346,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif state == ST_PLAY and not busy:
 			if event.keycode == KEY_R:
 				_restart()
+			elif event.keycode == KEY_S:
+				_use_boost(BOOST_SHUFFLE)
 			elif event.keycode in [KEY_SPACE, KEY_ENTER] and game_over and won:
 				_next_level()
 		return
@@ -1308,6 +1355,17 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		var cell := _cell_at(event.position)
+		if hammer_armed:
+			# a tap off the board, or on a hole, just cancels - no charge
+			hammer_armed = false
+			_hide_notice()
+			if cell.x >= 0 and pieces[cell.y][cell.x] != null \
+					and _spend_stars(_boost_cost(BOOST_HAMMER)):
+				_highlight(selected, false)
+				selected = Vector2i(-1, -1)
+				_use_hammer(cell)
+			_update_score()
+			return
 		if cell.x < 0:
 			return
 		if selected.x < 0:
@@ -1925,6 +1983,7 @@ func _load_level(i: int) -> void:
 	target = int(goal.get("score", star_base))
 	collected = 0
 	shuffles_left = 1
+	hammer_armed = false
 	_build_blocked()
 	_build_jelly()
 	score = 0
@@ -2034,12 +2093,14 @@ func _load_progress() -> void:
 	var loaded: bool = cf.load(SAVE_PATH) == OK
 	for i in level_table.size():
 		best[i] = int(cf.get_value("stars", str(i), 0)) if loaded else 0
+	spent_stars = int(cf.get_value("wallet", "spent", 0)) if loaded else 0
 
 
 func _save_progress() -> void:
 	var cf := ConfigFile.new()
 	for i in level_table.size():
 		cf.set_value("stars", str(i), int(best.get(i, 0)))
+	cf.set_value("wallet", "spent", spent_stars)
 	cf.save(SAVE_PATH)
 
 
@@ -2131,12 +2192,75 @@ func _arrange(cells: Array, bag: Array) -> void:
 		pool.remove_at(pick)
 
 
-func _use_shuffle() -> void:
+func _boost_cost(i: int) -> int:
+	if i == BOOST_SHUFFLE and shuffles_left > 0:
+		return 0                        # the level's own free reshuffle first
+	return int(BOOST_COST[i])
+
+
+func _refresh_boosters() -> void:
+	for i in boost_buttons.size():
+		var b: Button = boost_buttons[i]
+		var cost: int = _boost_cost(i)
+		if i == BOOST_HAMMER and hammer_armed:
+			b.text = "CANCEL"
+		else:
+			b.text = "%s %s" % [BOOST_NAMES[i],
+					"FREE" if cost == 0 else str(cost)]
+		b.disabled = busy or game_over or _stars_available() < cost
+
+
+func _use_boost(i: int) -> void:
+	if busy or game_over or state != ST_PLAY:
+		return
+	if i == BOOST_HAMMER:
+		# arming is free and a second press cancels; the star is taken when
+		# the hammer actually lands, so a misclick costs nothing
+		hammer_armed = not hammer_armed and _stars_available() >= _boost_cost(i)
+		if hammer_armed:
+			_show_notice("TAP A CRITTER")
+		else:
+			_hide_notice()
+		_update_score()
+		return
+	hammer_armed = false
+	_hide_notice()
+	if i == BOOST_SHUFFLE:
+		var paid: bool = _boost_cost(i) > 0
+		if paid:
+			if not _spend_stars(_boost_cost(i)):
+				return
+			shuffles_left += 1
+		if not await _use_shuffle() and paid:
+			spent_stars -= _boost_cost(i)   # it could not arrange one: refund
+			shuffles_left -= 1
+			_save_progress()
+		_update_score()
+	elif i == BOOST_MOVES and _spend_stars(_boost_cost(i)):
+		moves_left += BOOST_MOVES_GIVEN
+		_play("combo")
+		_show_notice("+%d MOVES" % BOOST_MOVES_GIVEN)
+		_update_score()
+		await get_tree().create_timer(0.6).timeout
+		_hide_notice()
+
+
+func _use_hammer(cell: Vector2i) -> void:
+	busy = true
+	_play("pop")
+	await _resolve([cell])
+	await _settle()
+	_check_outcome()
+	busy = false
+	_update_score()
+
+
+func _use_shuffle() -> bool:
 	# A free rearrange that costs no move and keeps score and progress. The
 	# board is reshuffled by the same routine the deadlock rescue uses, so the
 	# result is still match-free and still has a legal move.
 	if busy or game_over or shuffles_left <= 0:
-		return
+		return false
 	busy = true
 	shuffles_left -= 1
 	_update_score()
@@ -2146,6 +2270,7 @@ func _use_shuffle() -> void:
 		_update_score()
 	await _settle()
 	busy = false
+	return done
 
 
 func _reshuffle(notice: String = "no moves - shuffling") -> bool:
@@ -2300,6 +2425,22 @@ func _shot_select() -> void:
 	_goto(ST_SELECT)
 	await get_tree().create_timer(0.4).timeout
 	await _save_shot("user://shot_select.png")
+	music.stop()
+	get_tree().quit()
+
+
+func _shot_boost() -> void:
+	# dev: the booster bar with stars in the purse, idle and with the hammer up
+	for i in CHAPTER:
+		best[i] = 2
+	await _start_level(0)
+	await _settle()
+	_update_score()
+	await get_tree().create_timer(0.3).timeout
+	await _save_shot("user://shot_boost.png")
+	_use_boost(BOOST_HAMMER)
+	await get_tree().create_timer(0.3).timeout
+	await _save_shot("user://shot_boost_armed.png")
 	music.stop()
 	get_tree().quit()
 
@@ -2976,6 +3117,113 @@ func _selftest() -> void:
 	ok = _check("gate_marks_every_boundary", gate_marks.size(),
 			(level_table.size() - 1) / CHAPTER) and ok
 	best = saved_best
+	_refresh_select()
+
+	# --- boosters spend a wallet, not the gate total
+	var saved_spent: int = spent_stars
+	best = {}
+	spent_stars = 0
+	for i in CHAPTER:
+		best[i] = 2                                  # 20 earned, gate wants 13
+	ok = _check("purse_starts_full", _stars_available(), 20) and ok
+	ok = _check("purse_pays", _spend_stars(8), true) and ok
+	ok = _check("purse_debited", _stars_available(), 12) and ok
+	# The load-bearing one: a chapter you opened must stay open however much
+	# you spend, or a booster could strand you with no way forward.
+	ok = _check("spending_keeps_gates_open", _is_unlocked(CHAPTER), true) and ok
+	ok = _check("purse_refuses_overdraft", _spend_stars(99), false) and ok
+	ok = _check("purse_unchanged_by_refusal", _stars_available(), 12) and ok
+	_save_progress()
+	spent_stars = 0
+	_load_progress()
+	ok = _check("purse_persists", spent_stars, 8) and ok
+
+	# --- the booster bar
+	await _start_level(0)
+	await _settle()
+	_update_score()
+	ok = _check("boost_shuffle_starts_free", _boost_cost(BOOST_SHUFFLE), 0) and ok
+	var purse_before: int = _stars_available()
+	await _use_boost(BOOST_SHUFFLE)                  # the free one, no charge
+	ok = _check("boost_free_shuffle_costs_nothing",
+			_stars_available(), purse_before) and ok
+	ok = _check("boost_shuffle_now_priced",
+			_boost_cost(BOOST_SHUFFLE), int(BOOST_COST[BOOST_SHUFFLE])) and ok
+	var moves_before: int = moves_left
+	await _use_boost(BOOST_MOVES)
+	ok = _check("boost_moves_given", moves_left,
+			moves_before + BOOST_MOVES_GIVEN) and ok
+	ok = _check("boost_moves_paid", _stars_available(),
+			purse_before - int(BOOST_COST[BOOST_MOVES])) and ok
+
+	# arming the hammer is free, and a second press cancels it
+	_use_boost(BOOST_HAMMER)
+	ok = _check("hammer_arms", hammer_armed, true) and ok
+	var armed_purse: int = _stars_available()
+	_use_boost(BOOST_HAMMER)
+	ok = _check("hammer_cancels", hammer_armed, false) and ok
+	ok = _check("hammer_arming_is_free", _stars_available(), armed_purse) and ok
+
+	# it clears the cell it lands on, costs a star and costs no move
+	_use_boost(BOOST_HAMMER)
+	var hit := Vector2i(3, 4)
+	var score_before: int = score
+	moves_before = moves_left
+	armed_purse = _stars_available()
+	hammer_armed = false
+	ok = _check("hammer_pays_on_landing",
+			_spend_stars(_boost_cost(BOOST_HAMMER)), true) and ok
+	await _use_hammer(hit)
+	ok = _check("hammer_cleared_it", score > score_before, true) and ok
+	ok = _check("hammer_costs_no_move", moves_left, moves_before) and ok
+	ok = _check("hammer_charged", _stars_available(),
+			armed_purse - int(BOOST_COST[BOOST_HAMMER])) and ok
+	var gaps := 0
+	for r in ROWS:
+		for c in COLS:
+			if _is_open(r, c) and (grid[r][c] < 0 or pieces[r][c] == null):
+				gaps += 1
+	ok = _check("hammer_board_still_full", gaps, 0) and ok
+	ok = _check("hammer_no_stray_matches", _find_matches().size(), 0) and ok
+
+	# an empty purse disables every priced booster
+	spent_stars = _total_stars()
+	_update_score()
+	var priced_enabled := 0
+	for i in boost_buttons.size():
+		if _boost_cost(i) > 0 and not boost_buttons[i].disabled:
+			priced_enabled += 1
+	ok = _check("broke_disables_boosters", priced_enabled, 0) and ok
+
+	# the bar has to fit between the goal legend and the key line, and each
+	# label inside its own button - the HUD has collided twice before
+	var bar_ok := true
+	for i in boost_buttons.size():
+		var b: Button = boost_buttons[i]
+		if b.position.y < 708.0 or b.position.y + b.size.y > keys_label.position.y:
+			bar_ok = false
+		var candidates: Array = ["%s FREE" % BOOST_NAMES[i],
+				"%s %d" % [BOOST_NAMES[i], int(BOOST_COST[i])], "CANCEL"]
+		for t in candidates:
+			var w: float = ui_font.get_string_size(
+					t, HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
+			if w > b.size.x - 10.0:
+				bar_ok = false
+				push_warning("boost label '%s' is %dpx in a %dpx button"
+						% [t, int(w), int(b.size.x)])
+	ok = _check("boost_bar_fits", bar_ok, true) and ok
+
+	var screen_h: float = get_viewport_rect().size.y
+	var ink: float = keys_label.position.y + ui_font.get_string_size(
+			keys_label.text, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).y
+	var lowest: float = ink
+	for b in boost_buttons:
+		lowest = maxf(lowest, b.position.y + b.size.y)
+	ok = _check("hud_inside_viewport", lowest <= screen_h, true) and ok
+
+	best = saved_best
+	spent_stars = saved_spent
+	_save_progress()
 	_refresh_select()
 
 	# --- goals

@@ -249,6 +249,36 @@ can yield (13 of a possible 30), and `gate_always_payable` fails the build if a
 gate ever asks for more stars than the levels before it can give - an unpayable
 gate would end the game with no way forward.
 
+### Boosters
+
+Stars had nowhere to go but the gates, so the play HUD carries three, paid for
+on use with no inventory to manage:
+
+| Booster | Cost | Effect |
+| --- | --- | --- |
+| `SHUFFLE` | free once per level, then 1 | rearranges the board, keeping score |
+| `+5 MOVES` | 3 | extends the move budget mid-level |
+| `HAMMER` | 2 | arms, then the next tap clears that critter |
+
+Two rules keep the economy honest. **Gates read the lifetime star total and
+boosters a separate wallet** (`_total_stars()` vs `_stars_available()`, with
+`spent_stars` persisted), so no amount of spending can re-lock a chapter you
+have already opened - `spending_keeps_gates_open` asserts it. And the **hammer
+charges when it lands, not when it arms**, so a misclick or a second press
+costs nothing; a tap off the board or on a hole just cancels.
+
+The bar is squeezed into the 88px between the board and the bottom of the
+window - and the window is **760** tall, not 768, which is how the key line
+came to be drawn half off the screen. `hud_inside_viewport` measures the
+lowest row's ink against `get_viewport_rect()` rather than trusting a constant,
+and `boost_bar_fits` measures each label against its own button, since the
+first draft overflowed by a hair that no amount of reading the code revealed.
+
+The bar also gave the free reshuffle a button. It had been advertised on the
+key line as `S SHUFFLE` since it was written, but `KEY_S` was never bound to
+anything, so no player could ever have used it - and on the iOS browsers this
+build exists for, a keyboard hint is no use anyway. `S` works now too.
+
 `_is_unlocked(i)` is the one place both rules live, so the map, PLAY and the
 end-of-level advance cannot disagree about what is reachable: winning the last
 level of a chapter without the stars for the next drops back to the map, where
