@@ -2533,11 +2533,15 @@ func _shot_win() -> void:
 
 func _print_levels() -> void:
 	# dev: see the whole generated curve at a glance, for tuning
-	print("  n  sp  mv  star   goal")
+	print("  n  sp  mv  star  holes  goal")
 	for i in level_table.size():
 		var cfg: Dictionary = level_table[i]
-		print("%3d  %2d  %2d  %5d   %s%s" % [i + 1, int(cfg.get("species", SPECIES)),
-				int(cfg["moves"]), int(cfg["star_base"]), _level_summary(i),
+		var holes := 0
+		for line in cfg.get("shape", []):
+			holes += line.count("#")
+		print("%3d  %2d  %2d  %5d  %5s  %s%s" % [i + 1, int(cfg.get("species", SPECIES)),
+				int(cfg["moves"]), int(cfg["star_base"]),
+				"-" if holes == 0 else str(holes), _level_summary(i),
 				"   (override)" if i < 6 else ""])
 	get_tree().quit()
 
