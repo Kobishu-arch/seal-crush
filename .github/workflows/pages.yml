@@ -17,6 +17,7 @@ concurrency:
 
 env:
   GODOT_VERSION: 4.7.2
+  TEMPLATE_DIR: /home/runner/.local/share/godot/export_templates/4.7.2.stable
 
 jobs:
   build:
@@ -42,11 +43,28 @@ jobs:
           sudo chmod +x /usr/local/bin/godot
           godot --version
 
-      - name: Fetch web export templates
+      # Two attempts, as separate steps on purpose: run logs need admin rights,
+      # so step names are the only diagnosis available from the public API.
+      - name: Fetch web templates (range requests)
+        id: tpl_range
         if: steps.templates.outputs.cache-hit != 'true'
+        continue-on-error: true
         run: |
-          python3 tools/fetch_web_templates.py "${GODOT_VERSION}" \
-            "${HOME}/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          python3 tools/fetch_web_templates.py "${GODOT_VERSION}" "${TEMPLATE_DIR}"
+
+      - name: Fetch web templates (full pack via curl)
+        if: steps.templates.outputs.cache-hit != 'true' && steps.tpl_range.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          curl -sSLo pack.tpz \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          python3 tools/fetch_web_templates.py "${GODOT_VERSION}" "${TEMPLATE_DIR}" --pack pack.tpz
+          rm -f pack.tpz
+
+      - name: Verify templates present
+        run: |
+          ls -la "${TEMPLATE_DIR}"
+          test -s "${TEMPLATE_DIR}/web_nothreads_release.zip"
 
       # A fresh checkout has no .godot/, so resources must be imported first.
       - name: Import resources
