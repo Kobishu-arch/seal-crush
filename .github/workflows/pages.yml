@@ -80,6 +80,14 @@ jobs:
           godot --headless --path . --export-release "Web" build/index.html
           test -s build/index.wasm
           test -s build/index.pck
+
+      # Pages serves everything with max-age=600 and we cannot change that, so
+      # returning visitors would sit on a stale build for up to ten minutes.
+      - name: Add cache busting
+        run: |
+          python3 tools/cachebust.py build "${GITHUB_SHA}"
+          test -s build/version.txt
+          grep -q "cachebust" build/index.html
           ls -la build
 
       # enablement lets the action configure Pages itself (build_type: workflow)

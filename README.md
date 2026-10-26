@@ -341,6 +341,34 @@ Output is ~39 MB raw, **10.3 MB gzipped** (9.7 MB engine wasm, 0.6 MB pack).
 `seal-crush-web.zip` has `index.html` at its root, which is what itch.io wants -
 upload it and tick "This file will be played in the browser".
 
+### Always-fresh builds
+
+Pages serves everything with `cache-control: max-age=600` and that header
+cannot be changed, while Godot exports fixed filenames with no content hash.
+A returning visitor therefore sat on a stale build for up to ten minutes, and
+reopening the tab re-read the cache rather than refetching.
+
+Hashing the filenames would not have fixed it: `index.html` is cached too, so a
+returning visitor reads old HTML pointing at the old names it already holds.
+The build id has to be discovered at load time from a URL that cannot be
+cached. `tools/cachebust.py` therefore:
+
+- writes `version.txt` containing the commit SHA
+- injects a script into `<head>` that reads `version.txt?t=<now>` - unique on
+  every load, so never served from cache - and appends `?v=<id>` to the `.wasm`
+  and `.pck` requests
+
+The injected script is byte-identical in every build, so `index.html` being
+cacheable is harmless: the logic inside it runs fresh each load. Verified by
+serving a build locally and reading the network log:
+
+    GET /version.txt?t=1793053441370        -> 200
+    GET /index.wasm?v=local-test-ed78bd1    -> 200
+    GET /index.pck?v=local-test-ed78bd1     -> 200
+
+`index.js` still arrives via a plain script tag and stays cacheable; it only
+changes when the engine version does.
+
 The preset exports with `variant/thread_support=false`. The single-threaded
 build needs no `Cross-Origin-Opener-Policy` / `Cross-Origin-Embedder-Policy`
 headers, so it works on any static host, GitHub Pages included. The threaded
