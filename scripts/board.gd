@@ -2382,4 +2382,4 @@ func _selftest() -> void:
 
 	print("[selftest] %s   score=%d" % ["ALL PASS" if ok else "FAILURES", score])
 	music.stop()
-	get_tree().quit()
+	get_tree().quit(0 if ok else 1)   # non-zero so CI fails on a bad assertion

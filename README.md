@@ -328,6 +328,19 @@ On mobile the viewport is downscaled below 1x, which softens the pixel art -
 a responsive layout would be the fix, not a setting. iOS Safari is the weakest
 target for Godot web generally; test there early.
 
+### Continuous deployment
+
+`.github/workflows/pages.yml` exports and publishes to GitHub Pages on every
+push to `main`. Steps: install Godot, fetch the web templates (cached between
+runs), import resources, **run the self-test as a gate**, export, upload, deploy.
+
+The gate works because `_selftest()` now ends with `get_tree().quit(0 if ok
+else 1)`. Without that it always exited 0 and CI would have deployed over a
+failing assertion - a gate that cannot fail is not a gate.
+
+Pages has to be enabled once: *Settings -> Pages -> Source: GitHub Actions*.
+The repo must be public for Pages on a free plan.
+
 ### Export templates
 
 This install only had the Linux and Windows templates. Get the web ones with

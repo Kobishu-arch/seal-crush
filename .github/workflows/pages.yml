@@ -1,0 +1,81 @@
+name: Publish to Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a newer push supersedes an in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  GODOT_VERSION: 4.7.2
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The template pack is version-pinned, so it caches cleanly between runs.
+      - name: Cache export templates
+        id: templates
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/godot/export_templates
+          key: godot-web-templates-${{ env.GODOT_VERSION }}
+
+      - name: Install Godot
+        run: |
+          set -euo pipefail
+          curl -sSLo godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          unzip -q godot.zip
+          sudo mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
+          sudo chmod +x /usr/local/bin/godot
+          godot --version
+
+      - name: Fetch web export templates
+        if: steps.templates.outputs.cache-hit != 'true'
+        run: |
+          python3 tools/fetch_web_templates.py "${GODOT_VERSION}" \
+            "${HOME}/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+
+      # A fresh checkout has no .godot/, so resources must be imported first.
+      - name: Import resources
+        run: godot --headless --path . --import
+
+      # Gates the deploy: _selftest() exits non-zero when an assertion fails.
+      - name: Self-test
+        run: godot --headless --path . -- selftest
+
+      - name: Export web build
+        run: |
+          mkdir -p build
+          godot --headless --path . --export-release "Web" build/index.html
+          test -s build/index.wasm
+          test -s build/index.pck
+          ls -la build
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
