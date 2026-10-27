@@ -49,6 +49,26 @@ const CHAPTER_GATE := 1.3
 # open chapter gates. Extra shuffles are for meta progression to hand out later.
 const SHUFFLES_PER_LEVEL := 1
 
+# Named board outlines, each a per-column [top, bottom] open range. Describing a
+# shape by its column ranges makes the contiguity rule hold by construction:
+# a column can lose cells from its top or its bottom, never from its middle.
+const SHAPES := {
+	"heart":  [[1, 0, 0, 1, 1, 0, 0, 1], [4, 5, 6, 7, 7, 6, 5, 4]],
+	"igloo":  [[3, 1, 0, 0, 0, 0, 1, 3], [7, 7, 7, 5, 5, 7, 7, 7]],
+	"valley": [[0, 1, 2, 3, 3, 2, 1, 0], [7, 7, 7, 7, 7, 7, 7, 7]],
+	"castle": [[0, 2, 0, 2, 2, 0, 2, 0], [7, 7, 7, 6, 6, 7, 7, 7]],
+	"bridge": [[0, 0, 0, 0, 0, 0, 0, 0], [7, 6, 5, 4, 4, 5, 6, 7]],
+	"stairs": [[0, 0, 1, 1, 2, 2, 3, 3], [7, 7, 7, 7, 7, 7, 7, 7]],
+}
+# The rotation for shape levels (every third level). "floe" is the rounded
+# corners mask from _shape_mask, cut deep enough to read as a shape.
+const SHAPE_ORDER := ["floe", "floe", "heart", "igloo", "valley", "castle",
+		"bridge", "stairs"]
+# From this chapter on (0-based), the levels between shape levels get a
+# random ragged edge too - seeded per level, so it is the same every play.
+const DRIFT_FROM_CHAPTER := 1
+const AREA_EXP := 1.0
+
 const STAR_2_MOVES := 0.25      # fraction of the move budget still unspent
 const STAR_3_MOVES := 0.45
 const STAR_2 := 1.3          # multiples of target
@@ -1756,19 +1776,76 @@ func _shape_mask(shape: String, extent: float) -> Array:
 			var dy: float = abs(r - (ROWS - 1) / 2.0)
 			var open_cell := true
 			match shape:
-				"corners":
+				"floe":
 					# dx+dy <= extent: 6.0 shaves the corners (60 of 64 open),
-					# 5.0 a chamfered square (52), 4.0 a diamond (40)
+					# 5.0 a rounded floe (52), 4.0 a diamond (40)
 					open_cell = dx + dy <= extent
-				"jagged":
-					# steps cut from the TOP of each column only, which cannot
-					# break contiguity whatever the pattern (56 of 64 open)
-					open_cell = r >= (c * 5) % 3
 				_:
-					open_cell = true
+					if SHAPES.has(shape):
+						var prof: Array = SHAPES[shape]
+						open_cell = r >= int(prof[0][c]) and r <= int(prof[1][c])
+					else:
+						open_cell = true
 			line += "." if open_cell else "#"
 		rows.append(line)
 	return rows
+
+
+func _drift_mask(seed_n: int) -> Array:
+	"""A random ragged edge: a few cells nibbled off the top and bottom of the
+	columns, never the middle, so it cannot split a column. The walk keeps
+	neighbouring columns within one row of each other, which reads as a
+	natural floe edge rather than noise. Seeded, so a level never changes."""
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_n * 7919 + 104729
+	for attempt in 50:
+		var tops: Array = []
+		var bots: Array = []
+		var t: int = rng.randi_range(0, 2)
+		var b: int = rng.randi_range(6, 7)
+		for c in COLS:
+			t = clampi(t + rng.randi_range(-1, 1), 0, 2)
+			b = clampi(b + rng.randi_range(-1, 1), 6, 7)
+			tops.append(t)
+			bots.append(b)
+		var cut := 0
+		for c in COLS:
+			cut += int(tops[c]) + (ROWS - 1 - int(bots[c]))
+		if cut < 7 or cut > 12:
+			continue
+		var rows: Array = []
+		for r in ROWS:
+			var line := ""
+			for c in COLS:
+				line += "." if r >= int(tops[c]) and r <= int(bots[c]) else "#"
+			rows.append(line)
+		return rows
+	return []
+
+
+func _mask_open(mask: Array) -> int:
+	var n := 0
+	for r in ROWS:
+		for c in COLS:
+			if r >= mask.size() or c >= String(mask[r]).length() \
+					or String(mask[r])[c] != "#":
+				n += 1
+	return n
+
+
+func _jelly_on_open(layout: Array, mask: Array) -> Array:
+	# jelly on a hole could never be cleared, so drop any the mask covers
+	if mask.is_empty():
+		return layout
+	var out: Array = []
+	for r in layout.size():
+		var line := ""
+		for c in String(layout[r]).length():
+			var hole: bool = r < mask.size() and c < String(mask[r]).length() \
+					and String(mask[r])[c] == "#"
+			line += "." if hole else String(layout[r])[c]
+		out.append(line)
+	return out
 
 
 func _is_open(r: int, c: int) -> bool:
@@ -1900,16 +1977,24 @@ func _level_spec(n: int) -> Dictionary:
 		kind = GOAL_JELLY
 
 	var spec := {"species": species, "moves": moves}
-	# every third level narrows the board, tightening as chapters progress
+	# Every third level gets a named outline. From DRIFT_FROM_CHAPTER on, the
+	# levels in between (bar each chapter's opener) get a random ragged edge.
+	var mask: Array = []
 	if step % 3 == 2:
-		if (idx / 3) % 2 == 0:
-			spec["shape"] = _shape_mask("corners", maxf(6.0 - float(chapter) * 0.5, 4.5))
-		else:
-			spec["shape"] = _shape_mask("jagged", 0.0)
+		var shape_name: String = SHAPE_ORDER[(chapter * 3 + step / 3) % SHAPE_ORDER.size()]
+		mask = _shape_mask(shape_name, 5.0)
+	elif step % 3 == 1 and chapter >= DRIFT_FROM_CHAPTER:
+		mask = _drift_mask(n)
+	if not mask.is_empty():
+		spec["shape"] = mask
+	# Fewer cells means fewer matches per move, so the goal shrinks with the
+	# open area. The exponent was fitted with `-- balance all`.
+	var area: float = pow(float(_mask_open(mask)) / float(ROWS * COLS), AREA_EXP)
+	est_median = int(est_median * area)
 	match kind:
 		GOAL_COLLECT:
 			# random play collects ~1 piece of a given species per move
-			var count: int = maxi(int(round(moves * 0.8 * pressure)), 10)
+			var count: int = maxi(int(round(moves * 0.8 * pressure * area)), 10)
 			spec["star_base"] = int(round(est_median * pressure / 50.0) * 50)
 			spec["goal"] = {"kind": GOAL_COLLECT,
 					"species": idx % SPECIES, "count": count}
@@ -1923,12 +2008,12 @@ func _level_spec(n: int) -> Dictionary:
 			# where a cross is 12 - so pick the extent whose cell count lands
 			# closest to what the budget can clear. The sweep measured ~14 of
 			# 16 cleared in 20 moves, so target a little under one per move.
-			var want: int = maxi(int(round(moves * 0.9 * pressure)), 10)
-			var layout: Array = _jelly_pattern(shape, 2.0)
+			var want: int = maxi(int(round(moves * 0.9 * pressure * area)), 10)
+			var layout: Array = _jelly_on_open(_jelly_pattern(shape, 2.0), mask)
 			var best_gap: int = 9999
 			for tenths in range(40, 141, 5):            # extent 1.00 .. 3.50
 				var e: float = tenths / 40.0
-				var trial: Array = _jelly_pattern(shape, e)
+				var trial: Array = _jelly_on_open(_jelly_pattern(shape, e), mask)
 				var gap: int = absi(_layout_cells(trial) - want)
 				if gap < best_gap:
 					best_gap = gap
@@ -1967,7 +2052,10 @@ func _build_levels() -> void:
 			"goal": {"kind": GOAL_JELLY, "layout": JELLY_CENTER}})
 	_override(5, {"species": 6, "moves": 18, "star_base": 1650,
 			"goal": {"kind": GOAL_COLLECT, "species": 3, "count": 18}})
+	# Level 6 brings in the first board shape. The floe only trims the four
+	# corners' outer rows, which JELLY_WIDE keeps clear of.
 	_override(6, {"species": 6, "moves": 22, "star_base": 1700,
+			"shape": _shape_mask("floe", 5.0),
 			"goal": {"kind": GOAL_JELLY, "layout": JELLY_WIDE}})
 
 
@@ -2027,7 +2115,7 @@ func _build_jelly() -> void:
 		var line: String = rows[r]
 		for c in mini(line.length(), COLS):
 			var ch := line[c]
-			if ch == "1" or ch == "2":
+			if (ch == "1" or ch == "2") and _is_open(r, c):
 				var n := int(ch)
 				jelly[r][c] = n
 				jelly_left += n
@@ -2334,9 +2422,13 @@ func _shot_special() -> void:
 
 
 func _shot_shape() -> void:
-	await _start_level(8)
-	await get_tree().create_timer(0.4).timeout
-	await _save_shot("user://shot_shape.png")
+	# dev: every shaped level, one shot each (shot_shape_<n>.png)
+	for i in level_table.size():
+		if (level_table[i].get("shape", []) as Array).is_empty():
+			continue
+		await _start_level(i)
+		await get_tree().create_timer(0.4).timeout
+		await _save_shot("user://shot_shape_%d.png" % (i + 1))
 	music.stop()
 	get_tree().quit()
 
@@ -2456,6 +2548,8 @@ func _balance() -> void:
 	no_finish = true
 	var trials := 20
 	var stride: int = maxi(level_table.size() / 8, 1)
+	if OS.get_cmdline_user_args().has("all"):
+		stride = 1
 	print("  n  kind     mv  goal     score med  goal med  cleared")
 	for i in range(0, level_table.size(), stride):
 		var cfg: Dictionary = level_table[i]
@@ -3032,6 +3126,66 @@ func _selftest() -> void:
 				still_blocked += 1
 	ok = _check("shape_rejects_split_column", still_blocked, 0) and ok
 	board_shape = []
+
+	# Every shaped level must survive _build_blocked() as written - its
+	# fallback would quietly turn a bad shape into a plain board - and must
+	# cut enough to be seen. Level 9 once cut four corner cells and nobody
+	# noticed it was a shape at all.
+	var shapes_intact := true
+	var shapes_visible := true
+	var jelly_on_hole := 0
+	var shaped_unplayable := 0
+	var first_shape := -1
+	var first_drift := -1
+	for i in level_table.size():
+		var cfg: Dictionary = level_table[i]
+		var mask: Array = cfg.get("shape", [])
+		if mask.is_empty():
+			continue
+		if first_shape < 0:
+			first_shape = i
+		var want_holes: int = ROWS * COLS - _mask_open(mask)
+		board_shape = mask
+		_build_blocked()
+		var got_holes := 0
+		for r in ROWS:
+			for c in COLS:
+				if not _is_open(r, c):
+					got_holes += 1
+		if got_holes != want_holes:
+			shapes_intact = false
+		if want_holes < 8:
+			shapes_visible = false
+		var g: Dictionary = cfg["goal"]
+		if int(g["kind"]) == GOAL_JELLY:
+			for r in ROWS:
+				for c in COLS:
+					if String(g["layout"][r])[c] != "." and not _is_open(r, c):
+						jelly_on_hole += 1
+		_load_level(i)
+		await _settle()
+		if not _has_legal_move():
+			shaped_unplayable += 1
+		if i % CHAPTER % 3 == 1 and first_drift < 0:
+			first_drift = i
+	board_shape = []
+	ok = _check("shapes_survive_contiguity", shapes_intact, true) and ok
+	ok = _check("shapes_cut_enough_to_see", shapes_visible, true) and ok
+	ok = _check("shapes_no_jelly_on_holes", jelly_on_hole, 0) and ok
+	ok = _check("shapes_all_playable", shaped_unplayable, 0) and ok
+	# the first shape arrives inside chapter 1, on a hand-tuned level
+	ok = _check("shape_first_on_level_6", first_shape + 1, 6) and ok
+	# chapter 1 teaches the named shapes; random edges wait for chapter 2
+	ok = _check("drift_not_in_chapter_one", first_drift >= CHAPTER, true) and ok
+	ok = _check("drift_is_stable", _drift_mask(17) == _drift_mask(17), true) and ok
+	ok = _check("drift_varies", _drift_mask(17) != _drift_mask(18), true) and ok
+	var drift_ok := true
+	for n in range(1, 200):
+		var m: Array = _drift_mask(n)
+		var cut: int = ROWS * COLS - _mask_open(m)
+		if m.is_empty() or cut < 7 or cut > 12:
+			drift_ok = false
+	ok = _check("drift_always_in_range", drift_ok, true) and ok
 	_load_level(0)
 
 	# --- stars on goal levels come from moves left, not score

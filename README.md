@@ -200,8 +200,7 @@ than more proxy runs.
 
 ### Board shapes
 
-Every third level narrows the board: cells can be **blocked**, giving shapes
-rather than always an 8x8 rectangle. Blocked cells hold no piece, never match,
+Cells can be **blocked**, giving shapes rather than always an 8x8 rectangle. Blocked cells hold no piece, never match,
 are not clickable, and are drawn as slabs of ice sitting in the pool.
 
 **Open cells must be contiguous within each column.** That invariant is what
@@ -213,18 +212,37 @@ any column is rejected and the board falls back to full, rather than silently
 producing a region that can never refill. A ring is the obvious shape this
 rules out, and there is a test feeding exactly that.
 
-Two shapes so far, both provably contiguous:
+Shapes are written as a per-column `[top, bottom]` open range (`SHAPES`), so a
+column can only ever lose cells from its ends and the invariant holds by
+construction.
 
-- **corners** - `dx + dy <= extent`; 6.0 shaves the corners (60 of 64 open),
-  5.0 gives a chamfered square (52), 4.0 a diamond (40). Tightens by chapter.
-- **jagged** - steps cut from the *top* of each column only, which cannot break
-  contiguity whatever the pattern (56 of 64).
+**Named shapes** come every third level, in the rotation `SHAPE_ORDER`:
+floe (rounded corners), heart, igloo (with a door), valley, castle, bridge and
+stairs. Each cuts 10-16 cells, enough to read at a glance - the first version
+cut level 9's four corner cells and nobody noticed it was a shape. Level 6, a
+hand-tuned override, brings in the first one, the floe, which stays clear of
+its jelly.
 
-Six checks cover it, the load-bearing one being `shape_collapse_refills`:
-it clears the bottom of every column, runs gravity, then asserts every open
-cell refilled and nothing came to rest in a hole.
+**Random edges** start at `DRIFT_FROM_CHAPTER` (chapter 2): the levels between
+the named ones, apart from each chapter's opener, get a ragged edge nibbled
+off column tops and bottoms. A random walk keeps neighbouring columns within a
+row of each other, so it looks like the edge of a floe rather than noise. It
+cuts 7-12 cells and is seeded by the level number, so a level never changes.
 
-Goal kinds:Goal kinds:
+Fewer cells means fewer matches per move, so a shaped level's goal scales
+with its open area (`AREA_EXP`). With that in place, `-- balance all` shows
+shaped levels clearing about as often as their plain neighbours; before, the
+deeper-cut ones cleared 2 times in 20 to random play. Jelly never lands on a
+hole - it would be unclearable - so layouts are masked when generated and
+again when built.
+
+The load-bearing check is `shape_collapse_refills`: it clears the bottom of
+every column, runs gravity, then asserts every open cell refilled and nothing
+came to rest in a hole. The `shapes_*` checks run every shaped level through
+`_build_blocked()` and fail if one would fall back to a full board, cuts fewer
+than 8 cells, puts jelly on a hole or deals a board with no legal move.
+
+Goal kinds:
 
 - **score** - reach a score. The original behaviour.
 - **collect** - clear N pieces of one species. Counted in `_resolve` just
@@ -594,11 +612,13 @@ button text was invisible there.
     godot4 --path . -- shotwin               # screenshot the level-cleared overlay
     godot4 --path . -- shotmenu              # screenshot the menu
     godot4 --path . -- shothud               # screenshot the shuffle button, ready and used
+    godot4 --path . -- shotshape             # screenshot every shaped level
     godot4 --path . -- shotselect            # screenshot level select with stars
     godot4 --path . -- shotjelly             # screenshot a jelly level
     python3 art/mkbg.py assets               # regenerate both scenes
     python3 art/mkfont.py assets             # regenerate the pixel font
     godot4 --path . --headless -- balance    # median score per level, 30 runs each
+    godot4 --path . --headless -- balance all  # the same for every level, not every fourth
 
 `selftest` prints one PASS/FAIL line per check and ends with ALL PASS. 85
 checks: match classification (4h/4v/5/L), each blast shape, special
