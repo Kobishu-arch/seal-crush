@@ -284,6 +284,30 @@ end-of-level advance cannot disagree about what is reachable: winning the last
 level of a chapter without the stars for the next drops back to the map, where
 the toll is on screen.
 
+### Your seal on the map
+
+A seal stands on the floe you are up to - the same level PLAY takes you to,
+`_focus_level()`. Win, and when the map comes back it hops along the trail to
+the next floe, three hops a floe, and says hello when it lands. A replay that
+moves nothing leaves it where it is.
+
+If a gate has opened since the map was last drawn, it is **left standing** -
+caption reading "13 OF 13 STARS" - until the seal hops up onto the ridge, and
+then it sinks under it. That is the moment paying the toll is meant to feel
+like. A gate that opens away from the seal (stars from a replay further back)
+sinks on its own once the map is up. `gates_shown` remembers each gate as last
+drawn; only arriving on the map (`_refresh_select(true)`) leaves one pending,
+and every other refresh snaps, so nothing can get stuck half-open.
+
+The first visit, and any step backwards, just places the seal. More than
+`MAX_HOP_FLOES` behind, it skips ahead and hops only the last stretch. Across a
+gate the floes are 228px apart rather than 118, so the map scrolls up far
+enough to keep the starting floe in view.
+
+`seal_*` and `gate_*` checks cover placing, hopping, staying put on a replay,
+skipping ahead, snapping back, and the gate standing until the seal arrives;
+`gate_stands_until_seal_arrives` was confirmed by breaking it.
+
 ### The bottom of the HUD
 
 The shuffle button is squeezed into the 88px between the board and the bottom
@@ -613,6 +637,7 @@ button text was invisible there.
     godot4 --path . -- shotmenu              # screenshot the menu
     godot4 --path . -- shothud               # screenshot the shuffle button, ready and used
     godot4 --path . -- shotshape             # screenshot every shaped level
+    godot4 --path . -- shotseal              # the seal crossing the first gate, as frames
     godot4 --path . -- shotselect            # screenshot level select with stars
     godot4 --path . -- shotjelly             # screenshot a jelly level
     python3 art/mkbg.py assets               # regenerate both scenes

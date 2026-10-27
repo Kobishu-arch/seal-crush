@@ -67,6 +67,16 @@ const SHAPE_ORDER := ["floe", "floe", "heart", "igloo", "valley", "castle",
 # From this chapter on (0-based), the levels between shape levels get a
 # random ragged edge too - seeded per level, so it is the same every play.
 const DRIFT_FROM_CHAPTER := 1
+
+# the seal on the map
+const TOKEN_SCALE := 1.4
+const TOKEN_OFFSET := Vector2(52, 4)
+const HOPS_PER_FLOE := 3
+const MAX_HOP_FLOES := 2        # further behind than this, it skips ahead
+const HOP_SECS := 0.2
+const HOP_HEIGHT := 22.0
+const GATE_SINK := 7.0          # px the ridge drops once paid
+const GATE_SINK_SECS := 0.5
 const AREA_EXP := 1.0
 
 const STAR_2_MOVES := 0.25      # fraction of the move budget still unspent
@@ -144,6 +154,15 @@ var select_stars: Array = []
 var select_back: Button
 var select_total: Control
 var map_content: Control
+# The seal on the map: it stands on the level you are up to and hops along the
+# trail when that moves on. token_at is where it stands (-1 = not placed yet);
+# gates_shown is each gate as last drawn, so a gate that opened since sinks
+# on screen instead of just appearing open.
+var map_token: Node2D
+var map_token_sprite: AnimatedSprite2D
+var token_at := -1
+var token_hopping := false
+var gates_shown: Dictionary = {}
 var map_scroll: ScrollContainer
 var node_faces: Array = []
 var node_numbers: Array = []
@@ -226,6 +245,8 @@ func _ready() -> void:
 		_shot_play()
 	elif args.has("shothud"):
 		_shot_hud()
+	elif args.has("shotseal"):
+		_shot_seal()
 	elif args.has("shotgate"):
 		_shot_gate()
 	elif args.has("shotselect"):
@@ -742,6 +763,27 @@ func _build_select() -> void:
 			row.append(tr)
 		select_stars.append(row)
 
+	# the seal goes in last, so it stands on top of floes, stars and labels
+	map_token = Node2D.new()
+	map_token.z_index = 3
+	var shade := Polygon2D.new()
+	var ring := PackedVector2Array()
+	for k in 14:
+		var a := TAU * k / 14.0
+		ring.append(Vector2(cos(a) * 17.0, sin(a) * 4.5))
+	shade.polygon = ring
+	shade.color = Color(0.04, 0.10, 0.18, 0.40)
+	map_token.add_child(shade)
+	map_token_sprite = AnimatedSprite2D.new()
+	map_token_sprite.sprite_frames = frames[0]
+	map_token_sprite.scale = Vector2(TOKEN_SCALE, TOKEN_SCALE)
+	map_token_sprite.position = Vector2(0, -16.0 * TOKEN_SCALE + 3.0)
+	map_token_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	map_token.add_child(map_token_sprite)
+	map_token_sprite.play("idle")
+	map_token.visible = false
+	map_content.add_child(map_token)
+
 	select_total = _outlined("", Vector2(16, 710), Vector2(220, 26), 17,
 			Color("d8f1ff"))
 	select_layer.add_child(select_total)
@@ -769,26 +811,23 @@ func _build_gate(chapter: int, y: float) -> void:
 	var cap := _outlined("", Vector2(120, y + 14.0), Vector2(400, 34), 20,
 			Color("f4fbff"))
 	map_content.add_child(cap)
-	gate_marks.append({"chapter": chapter, "cap": cap, "floes": floes})
+	gate_marks.append({"chapter": chapter, "cap": cap, "floes": floes, "y": y})
 
 
-func _refresh_select() -> void:
+func _refresh_select(arriving: bool = false) -> void:
+	"""Redraws the map from progress. When the player is arriving on the map
+	(`arriving`), a gate that opened since it was last drawn is left standing
+	for _advance_token() to sink on screen; otherwise everything snaps."""
 	var total: int = _total_stars()
 	_retext(select_total, "%d OF %d STARS" % [total, level_table.size() * 3])
 	for g in gate_marks:
-		var need: int = _chapter_gate(int(g["chapter"]))
-		var open_gate: bool = total >= need
-		if open_gate:
-			_retext(g["cap"], "CHAPTER %d" % (int(g["chapter"]) + 1))
+		var ch: int = int(g["chapter"])
+		var open_gate: bool = total >= _chapter_gate(ch)
+		var shown: bool = bool(gates_shown.get(ch, open_gate))
+		if arriving and open_gate and not shown:
+			_gate_look(g, false)        # pending: it sinks once the seal is here
 		else:
-			_retext(g["cap"], "CHAPTER %d  %d OF %d STARS"
-					% [int(g["chapter"]) + 1, total, need])
-		g["cap"].modulate.a = 0.55 if open_gate else 1.0
-		for pair in g["floes"]:
-			# the ridge sinks away once the toll is paid
-			pair[0].color = Color(0.05, 0.12, 0.21, 0.18 if open_gate else 0.70)
-			pair[1].color = Color("9dc4e0") if not open_gate \
-					else Color(0.70, 0.84, 0.93, 0.25)
+			_gate_look(g, open_gate)
 
 	for i in level_table.size():
 		var unlocked: bool = _is_unlocked(i)
@@ -858,9 +897,135 @@ func _scroll_to_level(i: int) -> void:
 	map_scroll.scroll_vertical = int(maxf(y - 260.0, 0.0))
 
 
+func _gate_look(g: Dictionary, open_gate: bool, secs: float = 0.0) -> void:
+	"""Draws a gate standing or sunk. With `secs`, the ridge sinks over that
+	long rather than snapping - the moment the toll is paid, made visible."""
+	var ch: int = int(g["chapter"])
+	gates_shown[ch] = open_gate
+	if open_gate:
+		_retext(g["cap"], "CHAPTER %d" % (ch + 1))
+	else:
+		_retext(g["cap"], "CHAPTER %d  %d OF %d STARS"
+				% [ch + 1, _total_stars(), _chapter_gate(ch)])
+	var cap_a: float = 0.55 if open_gate else 1.0
+	var rim_col := Color(0.05, 0.12, 0.21, 0.18 if open_gate else 0.70)
+	var face_col: Color = Color(0.70, 0.84, 0.93, 0.25) if open_gate else Color("9dc4e0")
+	var sink: float = GATE_SINK if open_gate else 0.0
+	var y: float = float(g["y"])
+	if secs <= 0.0:
+		g["cap"].modulate.a = cap_a
+		for pair in g["floes"]:
+			pair[0].color = rim_col
+			pair[1].color = face_col
+			pair[0].position.y = y + sink
+			pair[1].position.y = y - 2.0 + sink
+		return
+	var tw := create_tween().set_parallel(true)
+	tw.tween_property(g["cap"], "modulate:a", cap_a, secs)
+	var k := 0
+	for pair in g["floes"]:
+		# outer floes go under a beat after the middle ones, like a wave
+		var d: float = absf(k - 2.5) * 0.05
+		tw.tween_property(pair[0], "color", rim_col, secs).set_delay(d)
+		tw.tween_property(pair[1], "color", face_col, secs).set_delay(d)
+		tw.tween_property(pair[0], "position:y", y + sink, secs) \
+				.set_delay(d).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+		tw.tween_property(pair[1], "position:y", y - 2.0 + sink, secs) \
+				.set_delay(d).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+		k += 1
+	await tw.finished
+
+
+func _token_spot(i: int) -> Vector2:
+	# feet on the floe's right shoulder, clear of the number and the stars
+	return _node_pos(clampi(i, 0, level_table.size() - 1)) + TOKEN_OFFSET
+
+
+func _gate_y(ch: int) -> float:
+	for g in gate_marks:
+		if int(g["chapter"]) == ch:
+			return float(g["y"])
+	return 0.0
+
+
+func _advance_token() -> void:
+	"""Moves the seal to the level the player is up to. The first time, and
+	when going backwards, it is just placed; otherwise it hops along the trail
+	one floe at a time, and a gate it crosses that has just opened sinks as it
+	lands on the ridge. Gates that opened elsewhere sink once it is done."""
+	if map_token == null or token_hopping:
+		return
+	var target: int = _focus_level()
+	map_token.visible = true
+	if token_at < 0 or target < token_at or fast:
+		token_at = target
+		map_token.position = _token_spot(target)
+		_sink_pending(0.0)
+		return
+	if target - token_at > MAX_HOP_FLOES:
+		# a long way behind: it is the last stretch that tells the story
+		token_at = target - 1
+		map_token.position = _token_spot(token_at)
+	token_hopping = true
+	while token_at < _focus_level():
+		var a: Vector2 = _token_spot(token_at)
+		var b: Vector2 = _token_spot(token_at + 1)
+		var ch: int = (token_at + 1) / CHAPTER
+		var crosses: bool = (token_at + 1) % CHAPTER == 0
+		if crosses:
+			# two hops up onto the ridge, the ridge sinks, two hops off it
+			var ridge := Vector2((a.x + b.x) * 0.5, _gate_y(ch) - 6.0)
+			for k in 2:
+				await _hop(a.lerp(ridge, (k + 1) / 2.0))
+			for g in gate_marks:
+				if int(g["chapter"]) == ch and not bool(gates_shown.get(ch, true)):
+					_play("combo")
+					await _gate_look(g, true, GATE_SINK_SECS)
+			for k in 2:
+				await _hop(ridge.lerp(b, (k + 1) / 2.0))
+		else:
+			for k in HOPS_PER_FLOE:
+				await _hop(a.lerp(b, (k + 1) / float(HOPS_PER_FLOE)))
+		token_at += 1
+	token_hopping = false
+	if state == ST_SELECT:
+		_play_voice(0)          # the seal says hello from its new floe
+	_sink_pending(GATE_SINK_SECS)
+
+
+func _hop(to: Vector2) -> void:
+	var from: Vector2 = map_token.position
+	_play("move", 1.15)
+	var arc := func(t: float) -> void:
+		map_token.position = from.lerp(to, t) + Vector2(0, -sin(PI * t) * HOP_HEIGHT)
+	var tw := create_tween()
+	tw.tween_method(arc, 0.0, 1.0, HOP_SECS)
+	await tw.finished
+	# a little squash on landing
+	var sq := create_tween()
+	map_token_sprite.scale = Vector2(TOKEN_SCALE * 1.15, TOKEN_SCALE * 0.85)
+	sq.tween_property(map_token_sprite, "scale",
+			Vector2(TOKEN_SCALE, TOKEN_SCALE), 0.08)
+	await sq.finished
+
+
+func _sink_pending(secs: float) -> void:
+	var total: int = _total_stars()
+	for g in gate_marks:
+		var ch: int = int(g["chapter"])
+		if total >= _chapter_gate(ch) and not bool(gates_shown.get(ch, true)):
+			_gate_look(g, true, secs)
+
+
 func _goto_select_at(i: int) -> void:
+	var from: int = token_at
 	_goto(ST_SELECT)
 	_scroll_to_level(i)
+	# Across a gate the floes are 228px apart, not 118: pull the view up so
+	# the floe the seal hops from is still on screen.
+	if from >= 0 and from < i and i - from <= 2 and map_scroll != null:
+		map_scroll.scroll_vertical = mini(map_scroll.scroll_vertical,
+				int(maxf(_node_pos(from).y - 90.0, 0.0)))
 
 
 func _next_unplayed() -> int:
@@ -888,7 +1053,8 @@ func _goto(s: int) -> void:
 	if s != ST_PLAY:
 		_hide_result()
 	if s == ST_SELECT:
-		_refresh_select()
+		_refresh_select(true)
+		_advance_token()
 	queue_redraw()
 
 
@@ -2489,6 +2655,32 @@ func _shot_hud() -> void:
 	get_tree().quit()
 
 
+func _shot_seal() -> void:
+	# dev: the seal crossing the first gate as it opens. 9 stars before level
+	# 10, then a 3-star clear brings the total to the toll of 13. Frames go to
+	# shot_seal_NN.png for stitching into a GIF.
+	best = {}
+	for i in 9:
+		best[i] = 1
+	best[0] = 2
+	await get_tree().create_timer(0.3).timeout     # let the map lay out first
+	_goto_select_at(_focus_level())
+	await get_tree().create_timer(0.5).timeout
+	await _save_shot("user://shot_seal_before.png")
+	best[9] = 3
+	_goto(ST_MENU)
+	_goto_select_at(10)
+	for f in 60:
+		await get_tree().create_timer(0.04).timeout
+		await _save_shot("user://shot_seal_%02d.png" % f)
+	while token_hopping:
+		await get_tree().process_frame
+	await get_tree().create_timer(0.8).timeout
+	await _save_shot("user://shot_seal_after.png")
+	music.stop()
+	get_tree().quit()
+
+
 func _shot_gate() -> void:
 	# dev: the first star gate, half paid, with the chapter boundary in frame
 	for i in CHAPTER:
@@ -2662,6 +2854,14 @@ func _check(name: String, got, want) -> bool:
 	var ok: bool = got == want
 	print("[%s] %-22s got=%s want=%s" % ["PASS" if ok else "FAIL", name, str(got), str(want)])
 	return ok
+
+
+func _token_settled() -> void:
+	# waits out a hop (and the gate sinks it triggers), up to a few seconds
+	var t: int = Time.get_ticks_msec()
+	while token_hopping and Time.get_ticks_msec() - t < 5000:
+		await get_tree().process_frame
+	await get_tree().create_timer(GATE_SINK_SECS + 0.3).timeout
 
 
 func _selftest() -> void:
@@ -3059,7 +3259,77 @@ func _selftest() -> void:
 	result_go.pressed.emit()                    # the button, not the keyboard
 	ok = _check("finish_returns_to_map", state, ST_SELECT) and ok
 	ok = _check("result_hidden_on_leaving", result_go.visible, false) and ok
+	await _token_settled()
+
+	# --- the seal on the map
+	best = {}
+	token_at = -1
+	gates_shown = {}
+	_goto_select_at(_focus_level())
+	ok = _check("seal_placed_on_first_visit", token_at, 0) and ok
+	ok = _check("seal_placed_without_hopping", token_hopping, false) and ok
+	ok = _check("seal_on_its_floe", map_token.position, _token_spot(0)) and ok
+	ok = _check("seal_visible", map_token.visible, true) and ok
+
+	best[0] = 2                                 # win level 1, back to the map
+	_goto(ST_PLAY)
+	_goto_select_at(1)
+	ok = _check("seal_hops_after_win", token_hopping, true) and ok
+	await _token_settled()
+	ok = _check("seal_reaches_next_floe", token_at, 1) and ok
+	ok = _check("seal_lands_on_its_floe", map_token.position, _token_spot(1)) and ok
+
+	best[0] = 3                                 # a replay moves nothing
+	_goto(ST_PLAY)
+	_goto_select_at(1)
+	ok = _check("seal_stays_on_replay", token_hopping, false) and ok
+
+	# far behind, it skips ahead and hops only the last stretch
+	for i in 7:
+		best[i] = 2
+	_goto(ST_PLAY)
+	_goto_select_at(7)
+	ok = _check("seal_long_walk_skips_ahead", token_at, 6) and ok
+	await _token_settled()
+	ok = _check("seal_long_walk_arrives", token_at, 7) and ok
+
+	# The gate: 9 stars before level 10, then a 3-star clear pays the 13.
+	best = {}
+	for i in 9:
+		best[i] = 1
+	best[0] = 2
+	token_at = -1
+	_goto_select_at(_focus_level())
+	ok = _check("seal_waits_at_gate", token_at, CHAPTER - 1) and ok
+	ok = _check("gate_drawn_shut", bool(gates_shown.get(1, true)), false) and ok
+	best[CHAPTER - 1] = 3
+	_goto(ST_PLAY)
+	_goto_select_at(CHAPTER)
+	# paid, but it stands until the seal gets there - that is the moment
+	ok = _check("gate_stands_until_seal_arrives",
+			bool(gates_shown.get(1, true)), false) and ok
+	ok = _check("gate_sinking_on_screen", gate_marks[0]["floes"][0][0].position.y,
+			float(gate_marks[0]["y"])) and ok
+	await _token_settled()
+	ok = _check("seal_crosses_gate", token_at, CHAPTER) and ok
+	ok = _check("gate_sunk_after_crossing", bool(gates_shown.get(1, false)), true) and ok
+	ok = _check("gate_ridge_lowered", gate_marks[0]["floes"][0][0].position.y,
+			float(gate_marks[0]["y"]) + GATE_SINK) and ok
+
+	# going backwards (progress reset) just places it, and a plain refresh
+	# never leaves a paid gate standing
+	best = {}
+	_goto_select_at(0)
+	ok = _check("seal_snaps_back", token_at, 0) and ok
+	ok = _check("seal_no_hop_back", token_hopping, false) and ok
+	for i in CHAPTER:
+		best[i] = 2
+	_refresh_select()
+	ok = _check("refresh_never_leaves_gate_pending",
+			bool(gates_shown.get(1, false)), true) and ok
+
 	best = saved_best2
+	_refresh_select()
 	_goto(ST_PLAY)
 	_load_level(0)
 
