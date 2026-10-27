@@ -38,11 +38,18 @@ test asserts that slice height matches `ORIGIN.y`.
 
 ### Free reshuffle
 
-`S` rearranges the board once per level. It costs no move and leaves score,
-goal progress and the move counter untouched - it runs the same routine the
-deadlock rescue uses, so the result is still match-free and still has a legal
-move. If no valid arrangement is found the shuffle is refunded rather than
-silently consumed. The remaining count shows in the key line.
+Every level comes with one free reshuffle: the `SHUFFLE` button under the
+board, or `S`. It costs no move and leaves score, goal progress and the move
+counter untouched - it runs the same routine the deadlock rescue uses, so the
+result is still match-free and still has a legal move. If no valid arrangement
+is found the shuffle is refunded rather than silently consumed. Once used, the
+button greys out and reads `SHUFFLE USED` until the next level.
+
+The count lives in `SHUFFLES_PER_LEVEL`. Stars are never spent on it - an
+earlier version sold extra shuffles, `+5 MOVES` and a hammer for stars, but at
+1-3 stars a level with the gates already claiming them there was never enough
+left to buy anything. More shuffles are meant to come from meta progression
+instead.
 
 ### Legend
 
@@ -254,40 +261,20 @@ can yield (13 of a possible 30), and `gate_always_payable` fails the build if a
 gate ever asks for more stars than the levels before it can give - an unpayable
 gate would end the game with no way forward.
 
-### Boosters
-
-Stars had nowhere to go but the gates, so the play HUD carries three, paid for
-on use with no inventory to manage:
-
-| Booster | Cost | Effect |
-| --- | --- | --- |
-| `SHUFFLE` | free once per level, then 1 | rearranges the board, keeping score |
-| `+5 MOVES` | 3 | extends the move budget mid-level |
-| `HAMMER` | 2 | arms, then the next tap clears that critter |
-
-Two rules keep the economy honest. **Gates read the lifetime star total and
-boosters a separate wallet** (`_total_stars()` vs `_stars_available()`, with
-`spent_stars` persisted), so no amount of spending can re-lock a chapter you
-have already opened - `spending_keeps_gates_open` asserts it. And the **hammer
-charges when it lands, not when it arms**, so a misclick or a second press
-costs nothing; a tap off the board or on a hole just cancels.
-
-The bar is squeezed into the 88px between the board and the bottom of the
-window - and the window is **760** tall, not 768, which is how the key line
-came to be drawn half off the screen. `hud_inside_viewport` measures the
-lowest row's ink against `get_viewport_rect()` rather than trusting a constant,
-and `boost_bar_fits` measures each label against its own button, since the
-first draft overflowed by a hair that no amount of reading the code revealed.
-
-The bar also gave the free reshuffle a button. It had been advertised on the
-key line as `S SHUFFLE` since it was written, but `KEY_S` was never bound to
-anything, so no player could ever have used it - and on the iOS browsers this
-build exists for, a keyboard hint is no use anyway. `S` works now too.
-
-`_is_unlocked(i)` is the one place both rules live, so the map, PLAY and the
+`_is_unlocked(i)` is the one place the lock rules live, so the map, PLAY and the
 end-of-level advance cannot disagree about what is reachable: winning the last
 level of a chapter without the stars for the next drops back to the map, where
 the toll is on screen.
+
+### The bottom of the HUD
+
+The shuffle button is squeezed into the 88px between the board and the bottom
+of the window - and the window is **760** tall, not 768, which is how the key
+line once came to be drawn half off the screen. `hud_inside_viewport` measures
+the lowest row's ink against `get_viewport_rect()` rather than trusting a
+constant, and `shuffle_button_fits` measures the longest label against the
+button, since an earlier bar overflowed by a hair that no amount of reading the
+code revealed.
 
 ### Tuning
 
@@ -596,9 +583,9 @@ Spacing is 118px, not 100: at 100 each node's info line landed inside the next
 floe's disc. The numbers invert to dark on the pale floe face - inherited light
 button text was invisible there.
 
-## Dev harnesses## Dev harnesses
+## Dev harnesses
 
-    godot4 --path . --headless -- selftest   # 13 checks: classification, blasts, cascade
+    godot4 --path . --headless -- selftest   # every check: rules, goals, gates, HUD layout
     godot4 --path . -- shot                  # screenshot the board
     godot4 --path . -- shotpop               # screenshot mid-pop
     godot4 --path . -- shotspecial           # screenshot with every special placed
@@ -606,6 +593,7 @@ button text was invisible there.
     godot4 --path . -- shotcombo             # screenshot a stripe + bomb combo firing
     godot4 --path . -- shotwin               # screenshot the level-cleared overlay
     godot4 --path . -- shotmenu              # screenshot the menu
+    godot4 --path . -- shothud               # screenshot the shuffle button, ready and used
     godot4 --path . -- shotselect            # screenshot level select with stars
     godot4 --path . -- shotjelly             # screenshot a jelly level
     python3 art/mkbg.py assets               # regenerate both scenes
