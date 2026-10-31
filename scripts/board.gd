@@ -14,32 +14,26 @@ const IDLE_DUR := [0.35, 0.25, 0.25, 0.09]
 const POP_DUR := [0.06, 0.05, 0.05, 0.05, 0.06, 0.06, 0.05, 0.08]
 const ORIGIN := Vector2(64, 160)
 const BG := Color("0d2137")
-# Jelly layouts: '.' none, '1' one layer, '2' two.
-const JELLY_CENTER := [
-	"........",
-	"........",
-	"..1111..",
-	"..1111..",
-	"..1111..",
-	"..1111..",
-	"........",
-	"........",
-]
-const JELLY_WIDE := [
-	"........",
-	"...11...",
-	".111111.",
-	".111111.",
-	".111111.",
-	".111111.",
-	"...11...",
-	"........",
-]
-
-# Levels are generated from a curve rather than typed out, so the count is one
-# constant away from 10 or 100. _level_spec(n) derives a level from its index;
-# _build_levels() then applies hand-authored overrides on top, which always win.
-const LEVEL_COUNT := 30
+# Levels are data (LEVELS_PATH), written by `-- bake`: _design_spec(n) says
+# what a level asks for, and the bot measures how many moves that takes. Jelly
+# layouts in it are eight strings: '.' none, '1' one layer, '2' two.
+const LEVELS_PATH := "res://data/levels.json"
+# Bot clear rate wanted on a level's budget: CLEAR_START in chapter 1, easing
+# to CLEAR_FLOOR by chapter CLEAR_RAMP_CHAPTERS, plus a per-step shape inside
+# each chapter (an easy opener, a sawtooth, a harder finale).
+const CLEAR_START := 0.85
+const CLEAR_FLOOR := 0.68
+const CLEAR_RAMP_CHAPTERS := 8.0
+const STEP_EASE := [0.10, 0.02, 0.0, -0.03, 0.04, -0.02, 0.03, -0.05, 0.0, -0.10]
+const MOVES_MIN := 14            # a calibrated budget must land in here,
+const MOVES_MAX := 30            # or the goal is resized and measured again
+const BAKE_TRIALS := 40
+# Stars on generated levels are measured too: the bot should earn 2 stars this
+# often, and 3 stars this often. Fixed rules (1.3x the target, a share of the
+# budget left) paid less and less as levels tightened, until chapters no
+# longer paid for their own gate.
+const STAR2_WANT := 0.5
+const STAR3_WANT := 0.22
 const CHAPTER := 10          # levels per chapter; the move budget resets here
 # Total stars needed to enter each chapter. Winning always banks at least one
 # star, so finishing a chapter guarantees CHAPTER stars - the gate asks for a
@@ -77,7 +71,6 @@ const HOP_SECS := 0.2
 const HOP_HEIGHT := 22.0
 const GATE_SINK := 7.0          # px the ridge drops once paid
 const GATE_SINK_SECS := 0.5
-const AREA_EXP := 1.0
 
 const STAR_2_MOVES := 0.25      # fraction of the move budget still unspent
 const STAR_3_MOVES := 0.45
@@ -219,7 +212,11 @@ func _ready() -> void:
 	_build_levels()
 	_load_progress()
 	_build_menu()
+	var t_map: int = Time.get_ticks_usec()
 	_build_select()
+	if OS.get_cmdline_user_args().has("shotmap"):
+		print("[map] %d levels built in %.1f ms" % [level_table.size(),
+				(Time.get_ticks_usec() - t_map) / 1000.0])
 	_goto(ST_MENU)
 	queue_redraw()
 	var args := OS.get_cmdline_user_args()
@@ -237,6 +234,10 @@ func _ready() -> void:
 		_shot_combo()
 	elif args.has("balance"):
 		_balance()
+	elif args.has("botcheck"):
+		_bot_check()
+	elif args.has("bake"):
+		_bake()
 	elif args.has("shotwin"):
 		_shot_win()
 	elif args.has("shotmenu"):
@@ -245,6 +246,8 @@ func _ready() -> void:
 		_shot_play()
 	elif args.has("shothud"):
 		_shot_hud()
+	elif args.has("shotmap"):
+		_shot_map()
 	elif args.has("shotseal"):
 		_shot_seal()
 	elif args.has("shotgate"):
@@ -1582,6 +1585,16 @@ func _highlight(cell: Vector2i, on: bool) -> void:
 	sp.modulate = Color(1.3, 1.3, 1.3) if on else Color(1, 1, 1)
 
 
+func _swap_grid(a: Vector2i, b: Vector2i) -> void:
+	# the data half of a swap, without touching sprites - the bot's lookahead
+	var g: int = grid[a.y][a.x]
+	grid[a.y][a.x] = grid[b.y][b.x]
+	grid[b.y][b.x] = g
+	var k: int = special[a.y][a.x]
+	special[a.y][a.x] = special[b.y][b.x]
+	special[b.y][b.x] = k
+
+
 func _swap_data(a: Vector2i, b: Vector2i) -> void:
 	var g: int = grid[a.y][a.x]
 	grid[a.y][a.x] = grid[b.y][b.x]
@@ -1904,6 +1917,15 @@ func _goal_text() -> String:
 func _stars_earned() -> int:
 	if int(goal.get("kind", GOAL_SCORE)) == GOAL_SCORE:
 		return _stars_for(score)
+	# Generated levels carry measured thresholds: moves still in hand for 2
+	# and for 3 stars. The classic 30 use the fraction-of-budget rule below.
+	var cut: Array = level_table[level].get("stars", [])
+	if cut.size() == 2:
+		if moves_left >= int(cut[1]):
+			return 3
+		if moves_left >= int(cut[0]):
+			return 2
+		return 1
 	var budget: float = float(level_table[level]["moves"])
 	var left: float = float(maxi(moves_left, 0)) / maxf(budget, 1.0)
 	if left >= STAR_3_MOVES:
@@ -1915,6 +1937,13 @@ func _stars_earned() -> int:
 
 func _stars_for(sc: int) -> int:
 	# stars always reflect score, whatever the level's goal is
+	var cut: Array = level_table[level].get("stars", []) if level < level_table.size() else []
+	if cut.size() == 2 and int(goal.get("kind", GOAL_SCORE)) == GOAL_SCORE:
+		if sc >= int(cut[1]):
+			return 3
+		if sc >= int(cut[0]):
+			return 2
+		return 1 if sc >= star_base else 0
 	if sc >= int(star_base * STAR_3):
 		return 3
 	if sc >= int(star_base * STAR_2):
@@ -2107,42 +2136,30 @@ func _layout_cells(rows: Array) -> int:
 	return n
 
 
-func _level_spec(n: int) -> Dictionary:
-	"""Derives level n (1-based) from the difficulty curve.
+func _design_spec(n: int, mag: float = 1.0) -> Dictionary:
+	"""What level n (1-based) asks of the player, before calibration.
 
-	Three dials move with n: the goal type cycles so no chapter repeats itself,
-	the magnitude climbs, and the move budget tapers across a chapter then
-	resets. The curve is a starting point - run `-- balance` and adjust the
-	coefficients rather than editing levels one by one.
+	This decides the goal and its size; it does NOT decide difficulty. The
+	bake plays the level with the bot and sets the move budget so that it
+	clears as often as _want_clear(n) says. So magnitudes here can simply
+	climb and level off - the numbers on the map go up - without the curve
+	having to guess how hard that makes the level. `mag` lets the bake
+	resize the goal when the budget it finds falls outside MOVES_MIN..MAX.
 	"""
 	var idx: int = n - 1
 	var chapter: int = idx / CHAPTER
 	var step: int = idx % CHAPTER
+	# 0 at level 1, about 0.75 by level 100: growth that levels off
+	var grow: float = 1.0 - exp(-float(idx) / 70.0)
 
-	# the opening eases players in with one species fewer
-	var species: int = 5 if n <= 3 else SPECIES
-
-	# budget tapers gently through a chapter, each chapter starting tighter
-	var moves: int = maxi(22 - step / 2 - chapter, 15)
-
-	# Magnitudes derive from the move budget, not from n. A sweep over the
-	# generated levels themselves refitted the median to 105 * moves - 525;
-	# the earlier 75 * moves - 120 was taken from a different rule set and
-	# undershot badly at high budgets. Deriving from n alone had given a 4540
-	# target on a 14-move level, which is simply unreachable.
-	var est_median: int = maxi(105 * moves - 525, 400)
-	# The hand-tuned levels sit near 0.95-1.0 of the estimated median, so the
-	# generated curve continues from there rather than restarting below them.
-	var pressure: float = 0.95 + 0.010 * idx
-
-	# one in four levels is a score level, the rest alternate collect and jelly
+	# one in four is a score level, the rest alternate collect and jelly
 	var kind: int = GOAL_SCORE
 	if step % 4 == 1:
 		kind = GOAL_COLLECT
 	elif step % 4 == 3:
 		kind = GOAL_JELLY
 
-	var spec := {"species": species, "moves": moves}
+	var spec := {"species": SPECIES, "source": "generated"}
 	# Every third level gets a named outline. From DRIFT_FROM_CHAPTER on, the
 	# levels in between (bar each chapter's opener) get a random ragged edge.
 	var mask: Array = []
@@ -2153,76 +2170,63 @@ func _level_spec(n: int) -> Dictionary:
 		mask = _drift_mask(n)
 	if not mask.is_empty():
 		spec["shape"] = mask
-	# Fewer cells means fewer matches per move, so the goal shrinks with the
-	# open area. The exponent was fitted with `-- balance all`.
-	var area: float = pow(float(_mask_open(mask)) / float(ROWS * COLS), AREA_EXP)
-	est_median = int(est_median * area)
+	# a smaller board asks for less, so budgets stay comparable
+	var area: float = float(_mask_open(mask)) / float(ROWS * COLS)
+	var fit: float = mag * area
+
 	match kind:
 		GOAL_COLLECT:
-			# random play collects ~1 piece of a given species per move
-			var count: int = maxi(int(round(moves * 0.8 * pressure * area)), 10)
-			spec["star_base"] = int(round(est_median * pressure / 50.0) * 50)
-			spec["goal"] = {"kind": GOAL_COLLECT,
-					"species": idx % SPECIES, "count": count}
+			var count: int = maxi(int(round((14.0 + 14.0 * grow) * fit)), 8)
+			spec["goal"] = {"kind": GOAL_COLLECT, "species": idx % SPECIES, "count": count}
 		GOAL_JELLY:
-			# extent is capped: a 3.0 extent is 36 cells, far past what a
-			# 15-move budget can clear
+			# fit the shape's extent to the wanted cell count: shapes vary
+			# hugely in area at the same extent
 			var shapes := ["block", "octagon", "diamond", "cross", "ring"]
 			var shape: String = shapes[(idx / 4) % shapes.size()]
-			# Fit the extent to the budget rather than capping it. Shapes vary
-			# hugely in area at the same extent - a block at 2.75 is 36 cells
-			# where a cross is 12 - so pick the extent whose cell count lands
-			# closest to what the budget can clear. The sweep measured ~14 of
-			# 16 cleared in 20 moves, so target a little under one per move.
-			var want: int = maxi(int(round(moves * 0.9 * pressure * area)), 10)
+			var want: int = maxi(int(round((16.0 + 16.0 * grow) * fit)), 8)
 			var layout: Array = _jelly_on_open(_jelly_pattern(shape, 2.0), mask)
 			var best_gap: int = 9999
 			for tenths in range(40, 141, 5):            # extent 1.00 .. 3.50
-				var e: float = tenths / 40.0
-				var trial: Array = _jelly_on_open(_jelly_pattern(shape, e), mask)
+				var trial: Array = _jelly_on_open(_jelly_pattern(shape, tenths / 40.0), mask)
 				var gap: int = absi(_layout_cells(trial) - want)
 				if gap < best_gap:
 					best_gap = gap
 					layout = trial
-			spec["star_base"] = int(round(est_median * pressure / 50.0) * 50)
 			spec["goal"] = {"kind": GOAL_JELLY, "layout": layout}
 		_:
-			var target: int = int(round(est_median * pressure / 50.0) * 50)
-			spec["star_base"] = target
+			var target: int = int(round((1150.0 + 700.0 * grow) * fit / 50.0) * 50)
 			spec["goal"] = {"kind": GOAL_SCORE, "score": target}
+	var g: Dictionary = spec["goal"]
+	spec["star_base"] = int(g.get("score", 0)) if kind == GOAL_SCORE \
+			else int(round((1150.0 + 700.0 * grow) / 50.0) * 50)
+	# a placeholder budget; the bake replaces it with a measured one
+	spec["moves"] = 20
 	return spec
 
 
-func _override(n: int, spec: Dictionary) -> void:
-	if n >= 1 and n <= level_table.size():
-		level_table[n - 1] = spec
+func _want_clear(n: int) -> float:
+	"""How often the bot should clear level n on its budget. Each chapter opens
+	easy, sawtooths, and ends on a harder finale; across chapters the middle
+	of that range drifts down and then levels off, so the game firms up
+	without ever turning into a grind."""
+	var idx: int = n - 1
+	var chapter: int = idx / CHAPTER
+	var step: int = idx % CHAPTER
+	var ramp: float = clampf(float(chapter) / CLEAR_RAMP_CHAPTERS, 0.0, 1.0)
+	var base: float = lerpf(CLEAR_START, CLEAR_FLOOR, ramp)
+	return clampf(base + float(STEP_EASE[step]), 0.45, 0.97)
 
 
 func _build_levels() -> void:
-	level_table = []
-	for n in range(1, LEVEL_COUNT + 1):
-		level_table.append(_level_spec(n))
-	# The first six were balanced by hand and have been played, so they are
-	# pinned rather than regenerated - and they double as the worked example of
-	# how an override is written.
-	# These targets were set when reaching one ENDED the level. Score levels
-	# now play the full budget, so 1000 in 22 moves is cleared by random play
-	# 20 times out of 20 - they are raised to stay meaningful.
-	_override(1, {"species": 6, "moves": 22, "star_base": 1250,
-			"goal": {"kind": GOAL_SCORE, "score": 1250}})
-	_override(2, {"species": 6, "moves": 22, "star_base": 1200,
-			"goal": {"kind": GOAL_COLLECT, "species": 0, "count": 16}})
-	_override(3, {"species": 6, "moves": 20, "star_base": 1500,
-			"goal": {"kind": GOAL_SCORE, "score": 1500}})
-	_override(4, {"species": 6, "moves": 20, "star_base": 1500,
-			"goal": {"kind": GOAL_JELLY, "layout": JELLY_CENTER}})
-	_override(5, {"species": 6, "moves": 18, "star_base": 1650,
-			"goal": {"kind": GOAL_COLLECT, "species": 3, "count": 18}})
-	# Level 6 brings in the first board shape. The floe only trims the four
-	# corners' outer rows, which JELLY_WIDE keeps clear of.
-	_override(6, {"species": 6, "moves": 22, "star_base": 1700,
-			"shape": _shape_mask("floe", 5.0),
-			"goal": {"kind": GOAL_JELLY, "layout": JELLY_WIDE}})
+	"""Levels are data: data/levels.json, written by `-- bake`. The first 30
+	are the original hand-tuned and curve-built levels, frozen as they were
+	played; everything after is generated by _design_spec and calibrated by
+	the bot. Without the file the game still runs on uncalibrated specs."""
+	level_table = _read_level_file(LEVELS_PATH)
+	if level_table.is_empty():
+		push_warning("no level file at %s - using uncalibrated levels" % LEVELS_PATH)
+		for n in range(1, CHAPTER * 3 + 1):
+			level_table.append(_design_spec(n))
 
 
 func _load_level(i: int) -> void:
@@ -2655,6 +2659,22 @@ func _shot_hud() -> void:
 	get_tree().quit()
 
 
+func _shot_map() -> void:
+	# dev: the map far along - every level up to `at=N` (default 75) cleared
+	var at := 75
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("at="):
+			at = int(a.substr(3))
+	for i in at - 1:
+		best[i] = 2
+	await get_tree().create_timer(0.3).timeout
+	_goto_select_at(_focus_level())
+	await get_tree().create_timer(0.6).timeout
+	await _save_shot("user://shot_map.png")
+	music.stop()
+	get_tree().quit()
+
+
 func _shot_seal() -> void:
 	# dev: the seal crossing the first gate as it opens. 9 stars before level
 	# 10, then a 3-star clear brings the total to the toll of 13. Frames go to
@@ -2720,10 +2740,165 @@ func _print_levels() -> void:
 		var holes := 0
 		for line in cfg.get("shape", []):
 			holes += line.count("#")
-		print("%3d  %2d  %2d  %5d  %5s  %s%s" % [i + 1, int(cfg.get("species", SPECIES)),
+		var note := "   (classic)"
+		if cfg.has("cal"):
+			note = "   want %.2f  bot %.2f  stars %.2f" % [float(cfg["cal"]["want"]),
+					float(cfg["cal"]["bot"]), float(cfg["cal"]["stars"])]
+		print("%3d  %2d  %2d  %5d  %5s  %-10s%s" % [i + 1, int(cfg.get("species", SPECIES)),
 				int(cfg["moves"]), int(cfg["star_base"]),
-				"-" if holes == 0 else str(holes), _level_summary(i),
-				"   (override)" if i < 6 else ""])
+				"-" if holes == 0 else str(holes), _level_summary(i), note])
+	get_tree().quit()
+
+
+func _level_to_data(cfg: Dictionary) -> Dictionary:
+	# a level as it is stored: plain ints and strings, nothing derived
+	var g: Dictionary = cfg["goal"]
+	var goal_out := {"kind": ["score", "collect", "jelly"][int(g["kind"])]}
+	match int(g["kind"]):
+		GOAL_SCORE:
+			goal_out["score"] = int(g["score"])
+		GOAL_COLLECT:
+			goal_out["species"] = SPECIES_SHORT[int(g["species"])]
+			goal_out["count"] = int(g["count"])
+		GOAL_JELLY:
+			goal_out["layout"] = (g["layout"] as Array).duplicate()
+	var out := {"species": int(cfg.get("species", SPECIES)), "moves": int(cfg["moves"]),
+			"star_base": int(cfg["star_base"]), "goal": goal_out}
+	if not (cfg.get("shape", []) as Array).is_empty():
+		out["shape"] = (cfg["shape"] as Array).duplicate()
+	for k in ["stars", "source", "cal"]:
+		if cfg.has(k):
+			out[k] = cfg[k]
+	return out
+
+
+func _level_from_data(d: Dictionary) -> Dictionary:
+	var g: Dictionary = d["goal"]
+	var kind: int = ["score", "collect", "jelly"].find(String(g["kind"]))
+	var goal_in := {"kind": kind}
+	match kind:
+		GOAL_SCORE:
+			goal_in["score"] = int(g["score"])
+		GOAL_COLLECT:
+			goal_in["species"] = SPECIES_SHORT.find(String(g["species"]))
+			goal_in["count"] = int(g["count"])
+		GOAL_JELLY:
+			goal_in["layout"] = Array(g["layout"])
+	var cfg := {"species": int(d.get("species", SPECIES)), "moves": int(d["moves"]),
+			"star_base": int(d["star_base"]), "goal": goal_in}
+	if d.has("shape"):
+		cfg["shape"] = Array(d["shape"])
+	if d.has("stars"):
+		cfg["stars"] = [int(d["stars"][0]), int(d["stars"][1])]
+	for k in ["source", "cal"]:
+		if d.has(k):
+			cfg[k] = d[k]
+	return cfg
+
+
+func _read_level_file(path: String) -> Array:
+	var text := FileAccess.get_file_as_string(path)
+	if text.is_empty():
+		return []
+	var parsed = JSON.parse_string(text)
+	if not (parsed is Dictionary) or not parsed.has("levels"):
+		push_error("level file %s did not parse" % path)
+		return []
+	var out: Array = []
+	for d in parsed["levels"]:
+		out.append(_level_from_data(d))
+	return out
+
+
+func _write_level_file(table: Array, path: String) -> void:
+	var levels: Array = []
+	for cfg in table:
+		levels.append(_level_to_data(cfg))
+	var f := FileAccess.open(ProjectSettings.globalize_path(path), FileAccess.WRITE)
+	f.store_string(JSON.stringify({"version": 1, "levels": levels}, "\t", false) + "\n")
+	f.close()
+	print("[levels] wrote %d levels to %s" % [levels.size(), path])
+
+
+func _bake() -> void:
+	"""Extends the level file to `count=N` levels (default 100). Only levels
+	not already in the file are made, so a level never changes once baked;
+	`from=N` re-bakes from level N on, for when the curve itself changes.
+	The file is rewritten after every level, so an interrupted bake resumes
+	where it stopped."""
+	var count := 100
+	var trials := BAKE_TRIALS
+	var from := -1
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("count="):
+			count = int(a.substr(6))
+		elif a.begins_with("trials="):
+			trials = int(a.substr(7))
+		elif a.begins_with("from="):
+			from = int(a.substr(5))
+	if from > 0:
+		level_table.resize(mini(level_table.size(), from - 1))
+	await _start_level(0)
+	fast = true
+	no_finish = true
+	var cal = preload("res://scripts/calibrate.gd").new(self)
+	var t0: int = Time.get_ticks_msec()
+	print("  n  kind     goal        mv  want  bot  stars  mag")
+	var kinds := {GOAL_SCORE: "score", GOAL_COLLECT: "collect", GOAL_JELLY: "jelly"}
+	for n in range(level_table.size() + 1, count + 1):
+		var spec: Dictionary = await cal.calibrate(n, trials)
+		var c: Dictionary = spec["cal"]
+		print("%3d  %-8s %-10s  %2d  %.2f  %.2f  %.2f  %.2f" % [n,
+				kinds[int(spec["goal"]["kind"])], _level_summary(n - 1),
+				int(spec["moves"]), c["want"], c["bot"], c["stars"], c["mag"]])
+		_write_level_file(level_table, LEVELS_PATH)
+	print("[bake] %d levels in the file, %.0fs" % [level_table.size(),
+			(Time.get_ticks_msec() - t0) / 1000.0])
+	fast = false
+	no_finish = false
+	music.stop()
+	get_tree().quit()
+
+
+func _bot_check() -> void:
+	"""How the greedy bot does on every level as it stands: clear rate on the
+	level's own budget, and the median move on which it met the goal."""
+	await _start_level(0)
+	fast = true
+	no_finish = true
+	var cal = preload("res://scripts/calibrate.gd").new(self)
+	var trials := 30
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("trials="):
+			trials = int(a.substr(7))
+	var t0: int = Time.get_ticks_msec()
+	print("  n  kind     mv  goal        bot clear  med reach  stars")
+	var star_sum := 0.0
+	var kinds := {GOAL_SCORE: "score", GOAL_COLLECT: "collect", GOAL_JELLY: "jelly"}
+	for i in level_table.size():
+		var games: Array = []
+		for t in trials:
+			games.append(await cal.play(i))
+		var reach: Array = []
+		for g in games:
+			reach.append(int(g["reached"]) if int(g["reached"]) > 0 else 999)
+		reach.sort()
+		var budget: int = int(level_table[i]["moves"])
+		var st: float = cal.stars(games, budget, int(level_table[i]["goal"]["kind"]),
+				level_table[i].get("stars", []))
+		star_sum += st
+		print("%3d  %-8s %2d  %-10s  %5.0f%%     %3d     %.2f" % [i + 1,
+				kinds[int(level_table[i]["goal"]["kind"])], budget, _level_summary(i),
+				100.0 * cal.clear_rate(games, budget), reach[reach.size() / 2], st])
+		if (i + 1) % CHAPTER == 0:
+			print("     chapter %d: %.2f stars a level (the next gate asks %.1f)"
+					% [(i + 1) / CHAPTER, star_sum / CHAPTER, CHAPTER_GATE])
+			star_sum = 0.0
+	print("[botcheck] %d levels x %d games in %.1fs" % [level_table.size(), trials,
+			(Time.get_ticks_msec() - t0) / 1000.0])
+	fast = false
+	no_finish = false
+	music.stop()
 	get_tree().quit()
 
 
@@ -3333,6 +3508,88 @@ func _selftest() -> void:
 	_goto(ST_PLAY)
 	_load_level(0)
 
+	# --- the level file
+	var from_file: Array = _read_level_file(LEVELS_PATH)
+	ok = _check("levels_from_file", from_file.size(), level_table.size()) and ok
+	ok = _check("levels_past_thirty", level_table.size() > 30, true) and ok
+	# the first 30 are frozen exactly as they were played
+	ok = _check("classic_level_1", [int(level_table[0]["moves"]),
+			int(level_table[0]["goal"]["score"])], [22, 1250]) and ok
+	ok = _check("classic_level_6_shaped", (level_table[5].get("shape", []) as Array).size(), ROWS) and ok
+	ok = _check("classic_level_30", [int(level_table[29]["moves"]),
+			_level_summary(29)], [16, "16x BEAR"]) and ok
+	_write_level_file(level_table, "user://levels_roundtrip.json")
+	var back: Array = _read_level_file("user://levels_roundtrip.json")
+	var same_back: bool = back.size() == level_table.size()
+	for i in mini(back.size(), level_table.size()):
+		if var_to_str(back[i]) != var_to_str(level_table[i]):
+			same_back = false
+	ok = _check("level_file_round_trip", same_back, true) and ok
+
+	# every generated level was measured, and landed where it was aimed
+	var uncal := 0
+	var out_of_range := 0
+	var off_target := 0
+	var chapter_stars: Dictionary = {}
+	for i in range(30, level_table.size()):
+		var cfg: Dictionary = level_table[i]
+		if not cfg.has("cal"):
+			uncal += 1
+			continue
+		var m: int = int(cfg["moves"])
+		if m < MOVES_MIN or m > MOVES_MAX:
+			out_of_range += 1
+		# the budget is the fewest moves that reach the target, so the bot sits
+		# at or a little above it - one move can be worth 10-15 points
+		var c: Dictionary = cfg["cal"]
+		var over: float = float(c["bot"]) - _want_clear(i + 1)
+		if over > 0.18 or (over < -0.001 and m < MOVES_MAX):
+			off_target += 1
+		var ch: int = i / CHAPTER
+		chapter_stars[ch] = float(chapter_stars.get(ch, 0.0)) + float(c["stars"])
+	ok = _check("generated_all_calibrated", uncal, 0) and ok
+	ok = _check("generated_budgets_in_range", out_of_range, 0) and ok
+	ok = _check("generated_on_target", off_target, 0) and ok
+	# Gates ask CHAPTER_GATE stars a level, so a chapter that pays the bot
+	# less than that would be a wall. Partial chapters at the end are skipped.
+	var thin_chapters: Array = []
+	for ch in chapter_stars:
+		if (ch + 1) * CHAPTER <= level_table.size() \
+				and float(chapter_stars[ch]) / CHAPTER < CHAPTER_GATE:
+			thin_chapters.append(ch + 1)
+	ok = _check("chapters_pay_their_gate", thin_chapters, []) and ok
+
+	# generated levels earn stars by their own measured thresholds
+	var star_rules_ok := true
+	for i in range(30, mini(level_table.size(), 34)):
+		var cut: Array = level_table[i].get("stars", [])
+		if cut.size() != 2:
+			star_rules_ok = false
+			continue
+		_load_level(i)
+		if int(goal["kind"]) == GOAL_SCORE:
+			for pair in [[int(cut[1]), 3], [int(cut[0]), 2], [star_base, 1], [star_base - 1, 0]]:
+				if _stars_for(int(pair[0])) != int(pair[1]):
+					star_rules_ok = false
+		else:
+			for pair in [[int(cut[1]), 3], [int(cut[0]), 2], [int(cut[0]) - 1, 1]]:
+				moves_left = int(pair[0])
+				if _stars_earned() != int(pair[1]):
+					star_rules_ok = false
+	ok = _check("generated_star_thresholds", star_rules_ok, true) and ok
+
+	ok = _check("design_is_deterministic",
+			var_to_str(_design_spec(57)) == var_to_str(_design_spec(57)), true) and ok
+	var curve_ok := true
+	for ch in 12:
+		var opener: float = _want_clear(ch * CHAPTER + 1)
+		var finale: float = _want_clear(ch * CHAPTER + CHAPTER)
+		if opener <= finale or finale < 0.45:
+			curve_ok = false
+	ok = _check("chapters_open_easy_end_hard", curve_ok, true) and ok
+	ok = _check("curve_levels_off",
+			_want_clear(150) == _want_clear(250), true) and ok
+
 	# --- holey boards
 	_load_level(8)                      # a generated level with a board shape
 	await _settle()
@@ -3399,8 +3656,8 @@ func _selftest() -> void:
 
 	# Every shaped level must survive _build_blocked() as written - its
 	# fallback would quietly turn a bad shape into a plain board - and must
-	# cut enough to be seen. Level 9 once cut four corner cells and nobody
-	# noticed it was a shape at all.
+	# cut enough to be seen (7 is the shallowest random edge). Level 9 once
+	# cut four corner cells and nobody noticed it was a shape at all.
 	var shapes_intact := true
 	var shapes_visible := true
 	var jelly_on_hole := 0
@@ -3424,7 +3681,7 @@ func _selftest() -> void:
 					got_holes += 1
 		if got_holes != want_holes:
 			shapes_intact = false
-		if want_holes < 8:
+		if want_holes < 7:
 			shapes_visible = false
 		var g: Dictionary = cfg["goal"]
 		if int(g["kind"]) == GOAL_JELLY:

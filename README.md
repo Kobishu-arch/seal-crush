@@ -131,72 +131,70 @@ Three screens, toggled by node layer (`menu_layer`, `select_layer`,
 
 ## Levels and goals
 
-Levels are **generated from a curve**, not typed out. `LEVEL_COUNT` is the only
-thing standing between 30 levels and 300.
+**Levels are data.** `data/levels.json` holds every level - goal, move budget,
+board shape, star thresholds - and the game just loads it. The file is written
+by the **bake**, which builds new levels in two steps:
 
-`_level_spec(n)` derives level n from its index. Three dials move with n: the
-goal type cycles so no chapter repeats itself, the move budget tapers across a
-chapter and resets at the next, and the magnitude is derived **from the move
-budget**, not from n.
+1. **Design.** `_design_spec(n)` decides what level n asks for: its goal type
+   (one in four a score level, the rest alternating collect and jelly), the
+   goal's size, and its board shape. Sizes climb and level off - a score
+   target of about 1150 early on, about 1650 by level 100 - and shrink with
+   the board's open area. Nothing here decides how hard the level is.
+2. **Measure.** The bot (`scripts/calibrate.gd`) plays the level 40 times,
+   and the move budget is set to the fewest moves on which it clears as often
+   as `_want_clear(n)` asks. The 2- and 3-star thresholds are measured the
+   same way, so the bot earns 2 stars about half the time (`STAR2_WANT`) and
+   3 stars about a fifth of the time (`STAR3_WANT`).
 
-That last point is the one that matters. Deriving magnitude from n alone
-produced a 4540-point target on a 14-move level - unreachable, since the
-balance sweep fitted median score to roughly `75 * moves - 120`. Targets are
-now `est_median * pressure`, where pressure climbs from 0.95 to about 1.25
-across 30 levels. The hand-tuned levels sit near 0.95-1.0, so the generated
-curve continues from them rather than restarting below.
+Adding levels is one command, and it only makes the levels that are not in
+the file yet, so a level never changes under a player once it has shipped:
 
-Jelly layouts are generated too, from shape functions (block, octagon, diamond,
-cross, ring) rather than hand-drawn strings. **The extent is fitted to the
-budget**, because shapes vary hugely in area at the same extent - a block at
-2.75 is 36 cells where a cross is 12 - so the extent whose cell count lands
-closest to what the budget can clear is chosen. A first pass that only capped
-from above gave 12-cell jelly levels on 20 moves, which is trivial.
+    godot4 --headless --path . -- bake count=150      # about 3 minutes per 70 levels
+    godot4 --headless --path . -- bake count=100 from=31   # re-bake from level 31 on
 
-`_build_levels()` applies **hand-authored overrides** last, so they always win.
-Levels 1-6 are pinned: they were balanced against measured medians and have
-been played, and they double as the worked example of how to write an override.
+The file is rewritten after every level, so an interrupted bake resumes where
+it stopped. To hand-tune a level, edit its entry in the file.
 
-    godot4 --headless --path . -- levels     # print the whole curve
+### The difficulty curve
 
-One known characteristic: absolute targets **sawtooth** rather than climbing
-monotonically, because they track the move budget, which falls through a
-chapter and resets. Difficulty still climbs, via pressure - a lower target on a
-tighter budget is harder - but the numbers on the map do not read as a straight
-line. Smoothing it would mean a budget that only ever shrinks.
+`_want_clear(n)` is the one dial for difficulty: how often the bot should
+clear level n on its budget.
 
-### What the sweep found
+- Each chapter **opens easy** (+0.10), **sawtooths** through the middle, and
+  ends on a **harder finale** (-0.10) - `STEP_EASE`.
+- Across chapters the middle drifts from `CLEAR_START` (0.85) down to
+  `CLEAR_FLOOR` (0.68) by chapter 8, then holds. The game firms up and then
+  stops getting harder, so it never turns into a grind.
 
-`-- balance` samples every fourth level, 20 trials each, and reports how often
-random play **clears** the goal - the figure that matters, since a rate near
-zero means unreachable and near one means trivial.
+Because difficulty is measured rather than predicted, the design numbers only
+have to be roughly right. When the budget the bot needs falls outside
+`MOVES_MIN`..`MOVES_MAX` (14-30), the goal is resized and measured again.
 
-    godot4 --headless --path . -- balance
+### Why a bot, and why stars are measured too
 
-Two things it caught:
+The older balance sweep played random moves. Random play never aims at
+anything, so it made jelly levels look three to ten times harder than they
+are: 5-25% cleared, against 75-100% for a greedy player. The bot looks one
+swap ahead and takes the move worth most to the goal - matched cells,
+specials, pieces of the collect species, jelly underneath.
 
-**Level 1 cleared 20 times out of 20.** Its 1000-point target was set when
-reaching one *ended* the level - it took a human three attempts under those
-rules. Score levels now play the full budget, so 22 moves reach 1000 almost
-regardless. Raising the pass mark is part of that rule change, not a separate
-decision; the pinned score targets went to 1250 and 1500.
+The first bake used the old fixed star rules (1.3x and 1.6x the target, or a
+share of the budget left). As levels tightened those paid less and less -
+about 1.1 stars a level by chapter 6 - while every gate asks for 1.3. Measured
+thresholds keep generated levels at 1.3-1.7 stars for the bot, so every
+chapter pays for the gate after it; `chapters_pay_their_gate` fails the build
+if one does not.
 
-**The median model was wrong at high budgets.** Measured against the generated
-levels, median score fits `105 * moves - 525`; the earlier `75 * moves - 120`
-came from a different rule set and undershot by ~250 points at 22 moves. After
-refitting, score-level clear rates fell from 40-80% into 30-40%.
+### The first 30
 
-Clear rates now run roughly: 90% at level 1, then 30-55%, with jelly at 10-15%.
-Jelly reads low because random play is a far weaker proxy there - it never aims
-at specific cells - so a human clears those far more often than the number
-suggests.
+Levels 1-30 are the original ones - six hand-tuned, the rest from the old
+formula - frozen into the file exactly as they were played, with the old star
+rules. Measured with the bot, they clear 45-100% of the time and pay 2.0, 1.7
+and 1.6 stars a level in chapters 1-3. That is the feel the generated curve
+continues from.
 
-**Still open:** collect levels clear at 40-65% against score levels' 30-40%,
-consistently across samples. That gap is larger than the ~11pp standard error
-at 20 trials, so the collect counts are probably a little soft. It is not
-adjusted here, because the right correction depends on how much a human
-outperforms random on *collect* specifically, and that wants playtesting rather
-than more proxy runs.
+    godot4 --headless --path . -- levels          # the whole table, with each level's measurements
+    godot4 --headless --path . -- botcheck        # re-measure every level with the bot
 
 ### Board shapes
 
@@ -220,7 +218,7 @@ construction.
 floe (rounded corners), heart, igloo (with a door), valley, castle, bridge and
 stairs. Each cuts 10-16 cells, enough to read at a glance - the first version
 cut level 9's four corner cells and nobody noticed it was a shape. Level 6, a
-hand-tuned override, brings in the first one, the floe, which stays clear of
+hand-tuned level, brings in the first one, the floe, which stays clear of
 its jelly.
 
 **Random edges** start at `DRIFT_FROM_CHAPTER` (chapter 2): the levels between
@@ -230,11 +228,10 @@ row of each other, so it looks like the edge of a floe rather than noise. It
 cuts 7-12 cells and is seeded by the level number, so a level never changes.
 
 Fewer cells means fewer matches per move, so a shaped level's goal scales
-with its open area (`AREA_EXP`). With that in place, `-- balance all` shows
-shaped levels clearing about as often as their plain neighbours; before, the
-deeper-cut ones cleared 2 times in 20 to random play. Jelly never lands on a
-hole - it would be unclearable - so layouts are masked when generated and
-again when built.
+with its open area, and the bake then measures its budget like any other.
+(Before the bake existed, shaped levels cleared 2 times in 20 to random play
+against their plain neighbours' 7-10.) Jelly never lands on a hole - it would
+be unclearable - so layouts are masked when generated and again when built.
 
 The load-bearing check is `shape_collapse_refills`: it clears the bottom of
 every column, runs gravity, then asserts every open cell refilled and nothing
@@ -644,6 +641,9 @@ button text was invisible there.
     python3 art/mkfont.py assets             # regenerate the pixel font
     godot4 --path . --headless -- balance    # median score per level, 30 runs each
     godot4 --path . --headless -- balance all  # the same for every level, not every fourth
+    godot4 --path . --headless -- botcheck   # greedy-bot clear rate and stars, every level
+    godot4 --path . --headless -- bake count=N  # design and calibrate levels up to N
+    godot4 --path . -- shotmap at=N          # screenshot the map with levels up to N cleared
 
 `selftest` prints one PASS/FAIL line per check and ends with ALL PASS. 85
 checks: match classification (4h/4v/5/L), each blast shape, special
